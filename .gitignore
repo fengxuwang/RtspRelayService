@@ -1,0 +1,13 @@
+bin/
+obj/
+publish/
+logs/
+TestResults/
+appsettings.Development.json
+appsettings.Local.json
+.env
+.env.*
+!.env.example
+*.user
+*.suo
+docs
