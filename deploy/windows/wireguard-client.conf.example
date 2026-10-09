@@ -1,0 +1,14 @@
+[Interface]
+# Replace this placeholder with the private key generated on Windows.
+# Keep the completed file outside source control.
+PrivateKey = <windows-wireguard-private-key>
+Address = 10.8.0.2/24
+
+[Peer]
+# Public key of the CentOS server key pair.
+PublicKey = <centos-wireguard-public-key>
+# Public DNS name or IP of the CentOS server and its UDP listen port.
+Endpoint = <centos-public-host>:51820
+# Only route the tunnel network through WireGuard; normal traffic is unaffected.
+AllowedIPs = 10.8.0.1/32
+PersistentKeepalive = 25

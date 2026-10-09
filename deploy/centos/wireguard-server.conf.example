@@ -1,0 +1,13 @@
+[Interface]
+# Replace this placeholder with the private key generated on CentOS.
+# Keep the completed file owned by root and readable only by root (0600).
+PrivateKey = <centos-wireguard-private-key>
+Address = 10.8.0.1/24
+ListenPort = 51820
+SaveConfig = false
+
+[Peer]
+# Public key of the Windows peer key pair; never put the Windows private key here.
+PublicKey = <windows-peer-public-key>
+AllowedIPs = 10.8.0.2/32
+PersistentKeepalive = 25

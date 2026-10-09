@@ -1,0 +1,342 @@
+using System.Globalization;
+using ActivityRecordingService.Configuration;
+using ActivityRecordingService.Recording;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Options;
+
+namespace ActivityRecordingService.Api;
+
+public static class RecordingApi
+{
+    private const int DefaultPageSize = 20;
+    private const int MaxPageSize = 100;
+
+    public static void Map(WebApplication app)
+    {
+        app.UseAuthentication();
+        app.UseAuthorization();
+
+        var api = app.MapGroup("/recordings/api");
+
+        api.MapPost("/auth/token", (
+            TokenRequest request,
+            HttpContext httpContext,
+            ApiKeyAuthenticator authenticator,
+            JwtTokenIssuer tokenIssuer,
+            ApiKeyRateLimiter rateLimiter,
+            IOptions<ActivityRecordingOptions> options) =>
+        {
+            var decision = rateLimiter.Acquire(
+                httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+            if (!decision.Allowed)
+                return new RateLimitResult(decision.RetryAfter ?? TimeSpan.FromSeconds(1));
+
+            if (request.ApiKey is null)
+                return Results.BadRequest();
+
+            var credentialName = authenticator.Verify(
+                request.ApiKey,
+                options.Value.Api.ApiKeys);
+            if (credentialName is null)
+                return Results.Unauthorized();
+
+            var token = tokenIssuer.CreateToken(credentialName);
+            return Results.Ok(new TokenResponse("Bearer", token.Token, token.ExpiresAtUtc));
+        });
+
+        api.MapGet("/events", async Task<IResult> (
+            string? camera,
+            DateTimeOffset? fromUtc,
+            DateTimeOffset? toUtc,
+            IEventRepository repository,
+            IOptions<ActivityRecordingOptions> options,
+            CancellationToken cancellationToken,
+            int offset = 0,
+            int limit = DefaultPageSize) =>
+        {
+            if (offset < 0 || offset > int.MaxValue - limit || limit is < 1 or > MaxPageSize)
+                return Results.BadRequest();
+            if (fromUtc > toUtc)
+                return Results.BadRequest();
+
+            var activeEvents = new List<EventRecord>();
+            var repositoryOffset = 0;
+            while (activeEvents.Count < offset + limit)
+            {
+                var batch = await repository.ListEventsAsync(
+                    camera,
+                    fromUtc,
+                    toUtc,
+                    repositoryOffset,
+                    MaxPageSize,
+                    cancellationToken);
+                if (batch.Count == 0)
+                    break;
+
+                activeEvents.AddRange(batch.Where(item => item.Status != EventStatus.Deleted));
+                repositoryOffset += batch.Count;
+                if (batch.Count < MaxPageSize)
+                    break;
+            }
+
+            var responses = new List<EventResponse>(limit);
+            foreach (var item in activeEvents.Skip(offset).Take(limit))
+            {
+                var files = await repository.GetFilesAsync(item.EventId, cancellationToken);
+                responses.Add(ToResponse(item, files.Select(ToFileResponse).ToArray(), options.Value));
+            }
+
+            return Results.Ok(new EventPageResponse(responses, offset, limit));
+        }).RequireAuthorization();
+
+        api.MapGet("/events/{eventId}", async Task<IResult> (
+            Guid eventId,
+            IEventRepository repository,
+            IOptions<ActivityRecordingOptions> options,
+            CancellationToken cancellationToken) =>
+        {
+            var item = await repository.GetEventAsync(eventId, cancellationToken);
+            if (item is null || item.Status == EventStatus.Deleted)
+                return Results.NotFound();
+
+            var files = await repository.GetFilesAsync(eventId, cancellationToken);
+            return Results.Ok(ToResponse(item, files.Select(ToFileResponse).ToArray(), options.Value));
+        }).RequireAuthorization();
+
+        api.MapGet("/events/{eventId}/playback-urls", async Task<IResult> (
+            Guid eventId,
+            IEventRepository repository,
+            PlaybackUrlSigner signer,
+            TimeProvider timeProvider,
+            IOptions<ActivityRecordingOptions> options,
+            CancellationToken cancellationToken) =>
+        {
+            var item = await repository.GetEventAsync(eventId, cancellationToken);
+            if (item is null || item.Status == EventStatus.Deleted)
+                return Results.NotFound();
+
+            var files = await repository.GetFilesAsync(eventId, cancellationToken);
+            var expiresAtUtc = timeProvider.GetUtcNow().AddMinutes(
+                options.Value.Api.PlaybackUrlLifetimeMinutes);
+            var urls = files
+                .Where(file => file.Status == RecordingFileStatus.Ready)
+                .Select(file => new PlaybackUrlResponse(
+                    file.FileId,
+                    file.PartIndex,
+                    signer.CreateUrl(options.Value.Api.PublicBasePath, file.FileId, expiresAtUtc),
+                    expiresAtUtc))
+                .ToArray();
+            return Results.Ok(urls);
+        }).RequireAuthorization();
+
+        api.MapGet("/files", async Task<IResult> (
+            string? camera,
+            IEventRepository repository,
+            PlaybackUrlSigner signer,
+            TimeProvider timeProvider,
+            IOptions<ActivityRecordingOptions> options,
+            CancellationToken cancellationToken,
+            int offset = 0,
+            int limit = DefaultPageSize) =>
+        {
+            if (offset < 0 || offset > int.MaxValue - limit || limit is < 1 or > MaxPageSize)
+                return Results.BadRequest();
+
+            var apiOptions = options.Value;
+            var expiresAtUtc = timeProvider.GetUtcNow().AddMinutes(
+                apiOptions.Api.PlaybackUrlLifetimeMinutes);
+            var items = await repository.ListFileEventsAsync(
+                camera,
+                offset,
+                limit,
+                cancellationToken);
+            var responses = new List<FileListItemResponse>(items.Count);
+            foreach (var item in items)
+            {
+                var playable = item.FileStatus == RecordingFileStatus.Ready;
+                responses.Add(new FileListItemResponse(
+                    item.FileId,
+                    item.EventId,
+                    item.CameraName,
+                    ResolveCameraDisplayName(item.CameraName, apiOptions),
+                    item.PartIndex,
+                    item.Bytes,
+                    item.FileStatus.ToString(),
+                    item.StartedUtc,
+                    item.EndedUtc,
+                    playable ? signer.CreateUrl(apiOptions.Api.PublicBasePath, item.FileId, expiresAtUtc) : null,
+                    playable ? expiresAtUtc : null));
+            }
+
+            return Results.Ok(new FilePageResponse(responses, offset, limit));
+        }).RequireAuthorization();
+
+        api.MapGet("/files/{fileId}/content", async Task<IResult> (
+            Guid fileId,
+            string? exp,
+            string? nonce,
+            string? signature,
+            PlaybackUrlSigner signer,
+            IEventRepository repository,
+            IOptions<ActivityRecordingOptions> options,
+            CancellationToken cancellationToken) =>
+        {
+            if (exp is null ||
+                !long.TryParse(exp, NumberStyles.Integer, CultureInfo.InvariantCulture, out var expiresAtUnix) ||
+                nonce is null ||
+                signature is null ||
+                !signer.Validate(fileId, expiresAtUnix, nonce, signature))
+            {
+                return Results.Unauthorized();
+            }
+
+            var file = await repository.GetReadyFileAsync(fileId, cancellationToken);
+            if (file is null)
+                return Results.NotFound();
+
+            if (!TryResolveConfinedPath(options.Value.RecordingRoot, file.RelativePath, out var fullPath) ||
+                !File.Exists(fullPath))
+            {
+                return Results.NotFound();
+            }
+
+            var item = await repository.GetEventAsync(file.EventId, cancellationToken);
+            if (item is null || item.Status == EventStatus.Deleted)
+                return Results.NotFound();
+
+            return TypedResults.PhysicalFile(
+                fullPath,
+                "video/mp4",
+                CreateDownloadName(item, file),
+                enableRangeProcessing: true);
+        });
+
+        api.MapGet("/health", async Task<IResult> (
+            IRecordingHealthMonitor monitor,
+            CancellationToken cancellationToken) =>
+        {
+            return Results.Ok(await monitor.GetHealthResponseAsync(cancellationToken));
+        });
+    }
+
+    private static bool TryResolveConfinedPath(
+        string recordingRoot,
+        string relativePath,
+        out string fullPath)
+    {
+        fullPath = string.Empty;
+        if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath))
+            return false;
+
+        if (relativePath.Split('/', '\\').Any(segment => segment == ".."))
+            return false;
+
+        try
+        {
+            var normalizedRoot = Path.GetFullPath(recordingRoot);
+            var candidate = Path.GetFullPath(Path.Combine(normalizedRoot, relativePath));
+            var rootWithSeparator = normalizedRoot.EndsWith(Path.DirectorySeparatorChar)
+                ? normalizedRoot
+                : normalizedRoot + Path.DirectorySeparatorChar;
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            if (!candidate.StartsWith(rootWithSeparator, comparison))
+                return false;
+            if (ContainsSymbolicLink(normalizedRoot, candidate))
+                return false;
+
+            fullPath = candidate;
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    private static bool ContainsSymbolicLink(string normalizedRoot, string candidate)
+    {
+        var current = normalizedRoot;
+        var relativePath = Path.GetRelativePath(normalizedRoot, candidate);
+        foreach (var segment in relativePath.Split('/', '\\'))
+        {
+            if (segment is "." or "..")
+                return true;
+
+            current = Path.Combine(current, segment);
+            if (Directory.Exists(current))
+            {
+                if (new DirectoryInfo(current).LinkTarget is not null)
+                    return true;
+            }
+            else if (new FileInfo(current).LinkTarget is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static EventResponse ToResponse(
+        EventRecord item,
+        IReadOnlyList<RecordingFileResponse> files,
+        ActivityRecordingOptions options) =>
+        new(
+            item.EventId,
+            item.CameraName,
+            ResolveCameraDisplayName(item.CameraName, options),
+            item.StartedUtc,
+            item.EndedUtc,
+            item.Status.ToString(),
+            item.FileBytes,
+            item.FileCount,
+            item.EndReason?.ToString(),
+            files);
+
+    private static string ResolveCameraDisplayName(
+        string cameraName,
+        ActivityRecordingOptions options) =>
+        options.Cameras?.FirstOrDefault(camera =>
+                string.Equals(camera.Name, cameraName, StringComparison.Ordinal)) is { } camera
+            && !string.IsNullOrWhiteSpace(camera.DisplayName)
+                ? camera.DisplayName
+                : cameraName;
+
+    private static RecordingFileResponse ToFileResponse(RecordingFileRecord file) =>
+        new(
+            file.FileId,
+            file.EventId,
+            file.PartIndex,
+            file.Bytes,
+            file.Status.ToString());
+
+    private sealed class RateLimitResult(TimeSpan retryAfter) : IResult
+    {
+        public Task ExecuteAsync(HttpContext httpContext)
+        {
+            httpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            httpContext.Response.Headers.RetryAfter = ((int)Math.Ceiling(retryAfter.TotalSeconds))
+                .ToString(CultureInfo.InvariantCulture);
+            httpContext.Response.ContentType = "text/plain; charset=utf-8";
+            return httpContext.Response.WriteAsync("Too many token requests.");
+        }
+    }
+
+    private static string CreateDownloadName(EventRecord item, RecordingFileRecord file)
+    {
+        var cameraName = new string(item.CameraName
+            .Where(character => !Path.GetInvalidFileNameChars().Contains(character))
+            .ToArray());
+        if (cameraName.Length > 40)
+            cameraName = cameraName[..40];
+
+        return $"event-{item.EventId:N}-{cameraName}-part-{file.PartIndex:D3}.mp4";
+    }
+}

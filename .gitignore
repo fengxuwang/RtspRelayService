@@ -5,6 +5,14 @@ logs/
 TestResults/
 appsettings.Development.json
 appsettings.Local.json
+src/RtspRelayService/appsettings.json
+src/ActivityRecordingService/appsettings.json
+models/*.onnx
+src/ActivityRecordingService/models/
+recordings/
+*.db
+*.db-shm
+*.db-wal
 .env
 .env.*
 !.env.example

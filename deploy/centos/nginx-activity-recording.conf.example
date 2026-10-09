@@ -1,0 +1,101 @@
+worker_processes auto;
+error_log /var/log/nginx/activity-recording-error.log notice;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    server_tokens off;
+
+    # Log the path but not the signed playback query string.
+    log_format activity_recording
+        '$remote_addr [$time_local] "$request_method $uri $server_protocol" '
+        '$status $body_bytes_sent rt=$request_time uct=$upstream_connect_time '
+        'uht=$upstream_header_time urt=$upstream_response_time';
+
+    limit_conn_zone $binary_remote_addr zone=activity_recording_conn:10m;
+    limit_req_zone $binary_remote_addr zone=activity_recording_auth:10m rate=5r/m;
+
+    server {
+        listen 443 ssl;
+        server_name <existing-domain>;
+
+        ssl_certificate <path-to-existing-fullchain-certificate>;
+        ssl_certificate_key <path-to-existing-private-key>;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:ActivityRecordingTLS:10m;
+        ssl_session_timeout 10m;
+        ssl_session_tickets off;
+
+        # Keep this standalone example intentionally closed. An exact match also
+        # gives the no-slash spelling the same 404 result as every other path.
+        location = /recordings {
+            return 404;
+        }
+
+        location / {
+            return 404;
+        }
+
+        # A URI on proxy_pass would strip /recordings/ and break the API routes.
+        location /recordings/ {
+            access_log /var/log/nginx/activity-recording-access.log activity_recording;
+            client_max_body_size 64k;
+
+            add_header X-Content-Type-Options nosniff always;
+            add_header Referrer-Policy no-referrer always;
+
+            limit_except GET POST {
+                deny all;
+            }
+
+            limit_conn activity_recording_conn 16;
+
+            proxy_pass http://10.8.0.2:5090;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host 10.8.0.2;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Port 443;
+            proxy_set_header Range $http_range;
+            proxy_set_header If-Range $http_if_range;
+
+            proxy_pass_header Accept-Ranges;
+            proxy_pass_header Content-Range;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_buffering off;
+            proxy_max_temp_file_size 0;
+            proxy_cache off;
+
+            # A nested location with add_header does not inherit the parent's
+            # headers, so both required security headers are repeated here.
+            location = /recordings/api/auth/token {
+                add_header X-Content-Type-Options nosniff always;
+                add_header Referrer-Policy no-referrer always;
+
+                limit_except GET POST {
+                    deny all;
+                }
+                limit_req zone=activity_recording_auth burst=5 nodelay;
+                limit_req_status 429;
+
+                proxy_pass http://10.8.0.2:5090;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_set_header Host 10.8.0.2;
+                proxy_set_header X-Forwarded-For $remote_addr;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Forwarded-Port 443;
+                proxy_connect_timeout 5s;
+                proxy_read_timeout 15s;
+                proxy_send_timeout 15s;
+                proxy_buffering off;
+                proxy_cache off;
+            }
+        }
+    }
+}

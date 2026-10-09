@@ -166,7 +166,7 @@ public sealed class DeploymentArtifactsTests
         readme.Should().Contain("appsettings.Development.json");
         readme.Should().Contain("Relay__FfmpegPath=/opt/homebrew/bin/ffmpeg");
         readme.Should().Contain("--self-contained true");
-        readme.Should().Contain("publish/windows-x64");
+        readme.Should().Contain("publish/rtsp-relay/windows-x64");
         readme.Should().Contain("ffmpeg/ffmpeg.exe");
         readme.Should().Contain("配置文件和日志会保留");
     }
