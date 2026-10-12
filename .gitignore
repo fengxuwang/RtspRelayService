@@ -5,10 +5,8 @@ logs/
 TestResults/
 appsettings.Development.json
 appsettings.Local.json
-src/RtspRelayService/appsettings.json
-src/ActivityRecordingService/appsettings.json
-models/*.onnx
-src/ActivityRecordingService/models/
+appsettings.json
+*.onnx
 recordings/
 *.db
 *.db-shm

@@ -20,7 +20,7 @@ public sealed class ActivityRecordingOptions
 
 public sealed class DetectionOptions
 {
-    public string ModelPath { get; set; } = "models/person-yolo11n.onnx";
+    public string ModelPath { get; set; } = "models/yolo11n.onnx";
     public int Width { get; set; } = 640;
     public int Height { get; set; } = 360;
     public int FramesPerSecond { get; set; } = 3;
