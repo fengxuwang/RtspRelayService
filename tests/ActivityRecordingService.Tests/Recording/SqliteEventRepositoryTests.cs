@@ -38,16 +38,20 @@ public sealed class SqliteEventRepositoryTests : IDisposable
     [Fact]
     public async Task Dispose_UsesUnpooledWalConnectionForDeterministicCleanup()
     {
-        await using var repository = await CreateRepositoryAsync();
+        var repository = await CreateRepositoryAsync();
         var connection = GetActiveConnection(repository);
-        await using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA journal_mode";
-        var journalMode = await command.ExecuteScalarAsync();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "PRAGMA journal_mode";
+            var journalMode = await command.ExecuteScalarAsync();
 
-        journalMode.Should().Be("wal");
-        connection.ConnectionString.Should().Contain(
-            "Pooling=False",
-            "the long-lived repository must not leave database handles in the SQLite pool");
+            journalMode.Should().Be("wal");
+            connection.ConnectionString.Should().Contain(
+                "Pooling=False",
+                "the long-lived repository must not leave database handles in the SQLite pool");
+        }
+
+        await repository.DisposeAsync();
 
         foreach (var databaseFile in Directory.GetFiles(_databaseDirectory.FullName))
             File.Delete(databaseFile);
@@ -280,7 +284,12 @@ public sealed class SqliteEventRepositoryTests : IDisposable
             freedBytes: 1_024,
             CancellationToken.None);
 
-        await using var connection = new SqliteConnection($"Data Source={DatabasePath}");
+        await using var connection = new SqliteConnection(
+            new SqliteConnectionStringBuilder
+            {
+                DataSource = DatabasePath,
+                Pooling = false
+            }.ToString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = """

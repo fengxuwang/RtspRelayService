@@ -553,7 +553,11 @@ public sealed class RetentionCleanerTests : IDisposable
     private async Task<List<(string Reason, int EventCount, long FreedBytes)>> QueryCleanupAuditsAsync()
     {
         await using var connection = new SqliteConnection(
-            $"Data Source={Path.Combine(_directory.FullName, "events.db")}");
+            new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(_directory.FullName, "events.db"),
+                Pooling = false
+            }.ToString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = """

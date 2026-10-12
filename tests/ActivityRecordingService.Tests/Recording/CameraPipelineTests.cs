@@ -20,6 +20,7 @@ public sealed class CameraPipelineTests : IDisposable
     private readonly DirectoryInfo _rootDirectory =
         Directory.CreateTempSubdirectory("camera-pipeline-");
     private readonly PipelineTimeProvider _timeProvider = new(StartedUtc);
+    private readonly List<SqliteEventRepository> _repositories = [];
 
     static CameraPipelineTests()
     {
@@ -142,6 +143,11 @@ public sealed class CameraPipelineTests : IDisposable
 
         pipeline.Snapshot.Recording.Should().Be(CameraProcessState.Retrying);
         harness.Recorder.Snapshot.State.Should().Be(CameraEventRecorderState.Failed);
+        await WaitUntilAsync(() => harness.Logger.Messages.Any(message =>
+            message.Contains("PID 200", StringComparison.Ordinal) &&
+            message.Contains("ExitCode 1", StringComparison.Ordinal) &&
+            message.Contains("RetryCount 1", StringComparison.Ordinal) &&
+            message.Contains("RunDurationSeconds", StringComparison.Ordinal)));
         harness.Logger.Messages.Should().Contain(message =>
             message.Contains("PID 200", StringComparison.Ordinal) &&
             message.Contains("ExitCode 1", StringComparison.Ordinal) &&
@@ -426,9 +432,11 @@ public sealed class CameraPipelineTests : IDisposable
             settings,
             [camera],
             Errors: []);
-        var repository = new CountingEventRepository(new SqliteEventRepository(
+        var innerRepository = new SqliteEventRepository(
             Path.Combine(_rootDirectory.FullName, "events.db"),
-            defaultRetentionDays: 7));
+            defaultRetentionDays: 7);
+        _repositories.Add(innerRepository);
+        var repository = new CountingEventRepository(innerRepository);
         await repository.InitializeAsync(CancellationToken.None);
 
         var rollingDirectory = Path.Combine(
@@ -463,7 +471,12 @@ public sealed class CameraPipelineTests : IDisposable
             eventDirectory);
     }
 
-    public void Dispose() => _rootDirectory.Delete(recursive: true);
+    public void Dispose()
+    {
+        foreach (var repository in _repositories)
+            repository.Dispose();
+        _rootDirectory.Delete(recursive: true);
+    }
 
     private string CreateRollingSegment(int sequence, DateTimeOffset modifiedUtc)
     {
@@ -564,7 +577,7 @@ public sealed class CameraPipelineTests : IDisposable
             Func<TState, Exception?, string> formatter)
         {
             var message = formatter(state, exception);
-            logger.Messages.Add(message);
+            logger.Record(message);
             if (message.Contains("Began event", StringComparison.Ordinal))
                 recordingStarted.Started.TrySetResult();
             if (message.Contains("Completed event", StringComparison.Ordinal) ||
@@ -1034,7 +1047,27 @@ public sealed class CameraPipelineTests : IDisposable
 
     private sealed class ListLogger<T> : ILogger<T>
     {
-        public List<string> Messages { get; } = [];
+        private readonly object _gate = new();
+        private readonly List<string> _messages = [];
+
+        public IReadOnlyList<string> Messages
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _messages];
+                }
+            }
+        }
+
+        public void Record(string message)
+        {
+            lock (_gate)
+            {
+                _messages.Add(message);
+            }
+        }
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -1045,7 +1078,7 @@ public sealed class CameraPipelineTests : IDisposable
             EventId eventId,
             TState state,
             Exception? exception,
-            Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, exception));
+            Func<TState, Exception?, string> formatter) => Record(formatter(state, exception));
     }
 
     private sealed class PipelineTimeProvider(DateTimeOffset now) : TimeProvider

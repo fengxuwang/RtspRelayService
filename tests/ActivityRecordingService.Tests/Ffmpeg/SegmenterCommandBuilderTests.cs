@@ -40,7 +40,7 @@ public sealed class SegmenterCommandBuilderTests
             "-reset_timestamps", "1",
             "-avoid_negative_ts", "make_zero",
             "-segment_format", "mp4",
-            "/recordings/front/rolling/rolling_%09d.mp4");
+            Path.Combine("/recordings/front/rolling", "rolling_%09d.mp4"));
     }
 
     private static ValidatedCameraOptions CreateCamera() =>

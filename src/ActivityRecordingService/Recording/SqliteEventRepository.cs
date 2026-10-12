@@ -4,12 +4,13 @@ using Microsoft.Data.Sqlite;
 
 namespace ActivityRecordingService.Recording;
 
-public sealed class SqliteEventRepository : IEventRepository
+public sealed class SqliteEventRepository : IEventRepository, IDisposable
 {
     private readonly string _databasePath;
     private readonly int _defaultRetentionDays;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SqliteConnection? _connection;
+    private int _disposed;
 
     public SqliteEventRepository(string databasePath, int defaultRetentionDays)
     {
@@ -608,6 +609,9 @@ public sealed class SqliteEventRepository : IEventRepository
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
         await _gate.WaitAsync();
         try
         {
@@ -620,6 +624,17 @@ public sealed class SqliteEventRepository : IEventRepository
             _gate.Release();
         }
 
+        _gate.Dispose();
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        if (_connection is not null)
+            _connection.Dispose();
+        _connection = null;
         _gate.Dispose();
     }
 

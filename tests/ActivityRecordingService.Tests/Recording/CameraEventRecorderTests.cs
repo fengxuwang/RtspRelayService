@@ -20,6 +20,7 @@ public sealed class CameraEventRecorderTests : IDisposable
         Directory.CreateTempSubdirectory("camera-event-recorder-");
     private readonly FakeTimeProvider _timeProvider = new(StartedUtc);
     private readonly RecordingLogger<CameraEventRecorder> _logger = new();
+    private readonly List<SqliteEventRepository> _repositories = [];
 
     static CameraEventRecorderTests()
     {
@@ -171,6 +172,7 @@ public sealed class CameraEventRecorderTests : IDisposable
         var innerRepository = new SqliteEventRepository(
             Path.Combine(_rootDirectory.FullName, "events.db"),
             defaultRetentionDays: 7);
+        _repositories.Add(innerRepository);
         await innerRepository.InitializeAsync(CancellationToken.None);
         var repository = new ReadyUpdateFailingRepository(innerRepository);
         var (recorder, _, runner, eventDirectory) = await CreateRecorderAsync(repository);
@@ -471,7 +473,10 @@ public sealed class CameraEventRecorderTests : IDisposable
             Path.Combine(_rootDirectory.FullName, "events.db"),
             defaultRetentionDays: 7);
         if (repositoryOverride is null)
+        {
+            _repositories.Add((SqliteEventRepository)repository);
             await repository.InitializeAsync(CancellationToken.None);
+        }
         var runner = new RecordingProcessRunner();
         var segmentManager = new RollingSegmentManager(
             _timeProvider,
@@ -504,7 +509,12 @@ public sealed class CameraEventRecorderTests : IDisposable
         return new RollingSegment(path, bytes, duration);
     }
 
-    public void Dispose() => _rootDirectory.Delete(recursive: true);
+    public void Dispose()
+    {
+        foreach (var repository in _repositories)
+            repository.Dispose();
+        _rootDirectory.Delete(recursive: true);
+    }
 
     private sealed class RecordingProcessRunner : IProcessRunner
     {

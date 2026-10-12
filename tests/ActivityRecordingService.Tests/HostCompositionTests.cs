@@ -20,11 +20,12 @@ public sealed class HostCompositionTests : IDisposable
 {
     private readonly DirectoryInfo _rootDirectory =
         Directory.CreateTempSubdirectory("activity-host-composition-");
+    private WebApplicationFactory<Program>? _factory;
 
     [Fact]
     public void ProductionProvider_BindsOptionsAndCreatesDistinctCameraRecorders()
     {
-        using var factory = CreateProductionFactory();
+        var factory = CreateProductionFactory();
         using var scope = factory.Services.CreateScope();
 
         var options = scope.ServiceProvider.GetRequiredService<IOptions<ActivityRecordingOptions>>();
@@ -44,7 +45,7 @@ public sealed class HostCompositionTests : IDisposable
     [Fact]
     public async Task ProductionProvider_RegistersHealthInterfaceAndMapsHealthEndpoint()
     {
-        using var factory = CreateProductionFactory();
+        var factory = CreateProductionFactory();
         using var scope = factory.Services.CreateScope();
         await scope.ServiceProvider
             .GetRequiredService<IEventRepository>()
@@ -63,7 +64,7 @@ public sealed class HostCompositionTests : IDisposable
     [Fact]
     public async Task HealthEndpoint_ExposesStartupCleanupStatesAndBlockingReason()
     {
-        using var factory = CreateProductionFactory();
+        var factory = CreateProductionFactory();
         using var scope = factory.Services.CreateScope();
         await scope.ServiceProvider
             .GetRequiredService<IEventRepository>()
@@ -103,7 +104,7 @@ public sealed class HostCompositionTests : IDisposable
     [Fact]
     public async Task HealthEndpoint_WhenCapacityCheckFails_ReturnsDegradedWithSanitizedReason()
     {
-        using var factory = CreateProductionFactory(new ThrowingDiskSpaceMonitor());
+        var factory = CreateProductionFactory(new ThrowingDiskSpaceMonitor());
         using var scope = factory.Services.CreateScope();
         await scope.ServiceProvider
             .GetRequiredService<IEventRepository>()
@@ -123,8 +124,9 @@ public sealed class HostCompositionTests : IDisposable
     }
 
     private WebApplicationFactory<Program> CreateProductionFactory(
-        IDiskSpaceMonitor? diskSpaceMonitor = null) =>
-        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        IDiskSpaceMonitor? diskSpaceMonitor = null)
+    {
+        var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseEnvironment("Testing");
             builder.ConfigureLogging(logging => logging.ClearProviders());
@@ -164,6 +166,10 @@ public sealed class HostCompositionTests : IDisposable
             });
         });
 
+        _factory = factory;
+        return factory;
+    }
+
     private static CameraEventRecorder GetRecorder(CameraPipeline pipeline)
     {
         var field = typeof(CameraPipeline).GetField(
@@ -197,7 +203,27 @@ public sealed class HostCompositionTests : IDisposable
         }
     }
 
-    public void Dispose() => _rootDirectory.Delete(recursive: true);
+    public void Dispose()
+    {
+        if (_factory is not null)
+        {
+            try
+            {
+                // Release the singleton repository before disposing the factory so the
+                // SQLite file handle is deterministically closed before the temp
+                // directory is deleted (Windows cannot delete open files).
+                if (_factory.Services.GetService<IEventRepository>() is IDisposable disposable)
+                    disposable.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            _factory.Dispose();
+        }
+
+        _rootDirectory.Delete(recursive: true);
+    }
 
     [Fact]
     public void Constructor_UsesConfiguredShutdownTimeout()

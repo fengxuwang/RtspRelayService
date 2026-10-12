@@ -16,7 +16,7 @@ public sealed class ActivityRecordingOptionsValidatorTests : IDisposable
         Directory.CreateDirectory(Path.Combine(_baseDirectory.FullName, "ffmpeg"));
         Directory.CreateDirectory(Path.Combine(_baseDirectory.FullName, "models"));
         File.WriteAllText(Path.Combine(_baseDirectory.FullName, "ffmpeg/ffmpeg.exe"), string.Empty);
-        File.WriteAllText(Path.Combine(_baseDirectory.FullName, "models/person-yolo11n.onnx"), string.Empty);
+        File.WriteAllText(Path.Combine(_baseDirectory.FullName, "models/yolo11n.onnx"), string.Empty);
     }
 
     [Fact]

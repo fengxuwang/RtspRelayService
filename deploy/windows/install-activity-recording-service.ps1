@@ -223,7 +223,7 @@ if ($activityEnabled) {
         throw "ActivityRecording:Detection must be a JSON object when ActivityRecording:Enabled is true."
     }
     $modelPath = Join-InstallPath -BaseDirectory $installDirectory -Path (
-        Get-ConfigurationValue -Configuration $detectionConfiguration -Name "ModelPath" -DefaultValue "models/person-yolo11n.onnx")
+        Get-ConfigurationValue -Configuration $detectionConfiguration -Name "ModelPath" -DefaultValue "models/yolo11n.onnx")
 
     if (-not (Test-Path -LiteralPath $ffmpegPath -PathType Leaf)) {
         throw "The FFmpeg executable configured by appsettings.json is missing. Disabled-first installation can omit FFmpeg, but it is required before enabling activity recording."

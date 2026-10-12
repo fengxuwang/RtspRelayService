@@ -7,10 +7,18 @@
     <UserSecretsId>dotnet-RtspRelayService-c1f42ceb-9090-47b0-9726-005b386bdda2</UserSecretsId>
   </PropertyGroup>
 
+  <!-- Publish options are opt-in via the publish command (README documents
+       self-contained publish). Hardcoding SelfContained here breaks NETSDK1151
+       rules when this project is referenced by framework-dependent publishers
+       such as ActivityRecordingService. In .NET 8 PublishSingleFile also infers
+       SelfContained, so gate it on self-contained publishing to keep the two
+       properties consistent. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' and '$(SelfContained)' == 'true'">
+    <PublishSingleFile>true</PublishSingleFile>
   </PropertyGroup>
 
   <ItemGroup>
