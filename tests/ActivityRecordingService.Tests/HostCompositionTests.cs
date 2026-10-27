@@ -32,13 +32,11 @@ public sealed class HostCompositionTests : IDisposable
         var pipelines = scope.ServiceProvider.GetRequiredService<IEnumerable<CameraPipeline>>().ToArray();
 
         options.Value.RecordingRoot.Should().Be(Path.Combine(_rootDirectory.FullName, "recordings"));
-        options.Value.Api.JwtSigningKey.Should().Be("production-jwt-signing-key-0123456789");
+        options.Value.Api.JwtSigningKey.Should().Be("cHJvZHVjdGlvbi1qd3Qtc2lnbmluZy1rZXk=");
         options.Value.Api.PlaybackUrlSigningKey.Should().Be("production-playback-key-0123456789");
-        options.Value.Api.ApiKeys.Should().ContainSingle().Which.Name.Should().Be("test-client");
         pipelines.Should().HaveCount(2);
         GetRecorder(pipelines[0]).Should().NotBeSameAs(GetRecorder(pipelines[1]));
 
-        scope.ServiceProvider.GetRequiredService<JwtTokenIssuer>().Should().NotBeNull();
         scope.ServiceProvider.GetRequiredService<PlaybackUrlSigner>().Should().NotBeNull();
     }
 
@@ -142,11 +140,8 @@ public sealed class HostCompositionTests : IDisposable
             builder.UseSetting("ActivityRecording:Detection:ModelPath", modelPath);
             builder.UseSetting("ActivityRecording:Api:Host", "127.0.0.1");
             builder.UseSetting("ActivityRecording:Api:Port", "5099");
-            builder.UseSetting("ActivityRecording:Api:JwtSigningKey", "production-jwt-signing-key-0123456789");
+            builder.UseSetting("ActivityRecording:Api:JwtSigningKey", "cHJvZHVjdGlvbi1qd3Qtc2lnbmluZy1rZXk=");
             builder.UseSetting("ActivityRecording:Api:PlaybackUrlSigningKey", "production-playback-key-0123456789");
-            builder.UseSetting("ActivityRecording:Api:ApiKeys:0:Name", "test-client");
-            builder.UseSetting("ActivityRecording:Api:ApiKeys:0:Salt", Convert.ToBase64String(new byte[16]));
-            builder.UseSetting("ActivityRecording:Api:ApiKeys:0:Hash", Convert.ToBase64String(new byte[32]));
             builder.UseSetting("ActivityRecording:Cameras:0:Name", "camera-a");
             builder.UseSetting("ActivityRecording:Cameras:0:Enabled", "true");
             builder.UseSetting("ActivityRecording:Cameras:0:DetectionUrl", "rtsp://camera-a.example/stream");

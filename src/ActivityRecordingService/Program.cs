@@ -11,7 +11,9 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
 using RtspRelayService.Ffmpeg;
 using RtspRelayService.Processes;
 using Serilog;
@@ -89,12 +91,6 @@ try
             AppContext.BaseDirectory,
             validated.Settings.Detection.ModelPath)),
         validated.Settings.Detection));
-    builder.Services.AddSingleton<ApiKeyAuthenticator>();
-    builder.Services.AddSingleton(serviceProvider => new ApiKeyRateLimiter(
-        serviceProvider.GetRequiredService<TimeProvider>(),
-        permitLimit: 5,
-        window: TimeSpan.FromMinutes(1)));
-    builder.Services.AddSingleton<JwtTokenIssuer>();
     builder.Services.AddSingleton<PlaybackUrlSigner>();
     builder.Services.AddSingleton<StartupRecovery>();
     builder.Services.AddSingleton<RecordingCapacityGuard>();
@@ -138,17 +134,54 @@ try
         .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         .AddJwtBearer(jwt =>
         {
+            // Tokens are issued by the 51banshou-oauth service (jjwt HS256).
+            // jjwt's String-key overloads Base64-decode the configured
+            // token.private_key, so the same value is decoded here. jjwt also
+            // accepts keys shorter than the .NET HS256 minimum (32 bytes).
+            // Zero-padding a short HMAC key to 32 bytes yields signatures
+            // identical to the original key (HMAC zero-pads keys to the
+            // 64-byte block), so pad instead of relaxing provider limits.
+            var signingKeyBytes = Convert.FromBase64String(validated.Settings.Api.JwtSigningKey);
+            if (signingKeyBytes.Length < 32)
+                Array.Resize(ref signingKeyBytes, 32);
             jwt.TokenValidationParameters = new TokenValidationParameters
             {
-                ValidIssuer = RecordingApiSecurity.JwtIssuer,
-                ValidAudience = RecordingApiSecurity.JwtAudience,
-                IssuerSigningKey = new SymmetricSecurityKey(
-                    Encoding.UTF8.GetBytes(validated.Settings.Api.JwtSigningKey)),
-                ValidateIssuer = true,
-                ValidateAudience = true,
+                ValidateIssuer = false,
+                ValidateAudience = false,
                 ValidateIssuerSigningKey = true,
                 ValidateLifetime = true,
-                ClockSkew = TimeSpan.Zero
+                IssuerSigningKey = new SymmetricSecurityKey(signingKeyBytes),
+                ClockSkew = TimeSpan.FromMinutes(1)
+            };
+            // 51banshou clients send the raw token in the Authorization header
+            // without a "Bearer " prefix; accept both forms.
+            jwt.Events = new JwtBearerEvents
+            {
+                OnMessageReceived = context =>
+                {
+                    var authorization = context.Request.Headers.Authorization.ToString();
+                    if (authorization.Length > 0 &&
+                        !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        context.Token = authorization;
+                    }
+
+                    return Task.CompletedTask;
+                },
+                // Mirror the 51banshou management-api StatelessRealm check:
+                // jjwt 0.7.0 Header.JWT_TYPE maps to the "calg" header param,
+                // which oauth stamps with "access_token" (refresh tokens carry
+                // "refresh_token" and must be rejected).
+                OnTokenValidated = context =>
+                {
+                    var tokenType = GetJjwtTokenType(context.SecurityToken);
+                    if (!string.Equals(tokenType, OAuthAccessTokenType, StringComparison.OrdinalIgnoreCase))
+                    {
+                        context.Fail("Token is not an OAuth access token.");
+                    }
+
+                    return Task.CompletedTask;
+                }
             };
         });
     builder.Services.AddAuthorization();
@@ -175,7 +208,23 @@ finally
     Log.CloseAndFlush();
 }
 
-public partial class Program;
+public partial class Program
+{
+    // jjwt 0.7.0 Header.JWT_TYPE constant value; oauth stamps "access_token".
+    public const string JjwtTokenTypeHeader = "JWT";
+    public const string OAuthAccessTokenType = "access_token";
+
+    public static string? GetJjwtTokenType(SecurityToken token) => token switch
+    {
+        JsonWebToken jwt => jwt.TryGetHeaderValue<string>(JjwtTokenTypeHeader, out var value)
+            ? value
+            : null,
+        JwtSecurityToken jws => jws.Header.TryGetValue(JjwtTokenTypeHeader, out var value)
+            ? value as string
+            : null,
+        _ => null
+    };
+}
 
 public sealed class ActivityRecordingHostedService(
     IEventRepository repository,

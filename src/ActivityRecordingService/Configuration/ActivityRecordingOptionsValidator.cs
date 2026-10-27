@@ -131,15 +131,6 @@ public static class ActivityRecordingOptionsValidator
         options.Api.PublicBasePath ??= string.Empty;
         options.Api.JwtSigningKey ??= string.Empty;
         options.Api.PlaybackUrlSigningKey ??= string.Empty;
-        options.Api.ApiKeys ??= [];
-        foreach (var key in options.Api.ApiKeys)
-        {
-            if (key is null)
-                continue;
-            key.Name ??= string.Empty;
-            key.Salt ??= string.Empty;
-            key.Hash ??= string.Empty;
-        }
     }
 
     private static void ValidateDetection(DetectionOptions detection, string baseDirectory, List<string> errors)
@@ -211,34 +202,12 @@ public static class ActivityRecordingOptionsValidator
             errors.Add("Api Port must be between 1 and 65535.");
         if (string.IsNullOrWhiteSpace(api.PublicBasePath) || !api.PublicBasePath.StartsWith('/'))
             errors.Add("Api PublicBasePath must start with '/'.");
-        if (Encoding.UTF8.GetByteCount(api.JwtSigningKey) < 32)
-            errors.Add("Api JwtSigningKey must contain at least 32 characters.");
-        if (api.JwtLifetimeMinutes <= 0)
-            errors.Add("Api JwtLifetimeMinutes must be positive.");
+        if (!IsBase64(api.JwtSigningKey))
+            errors.Add("Api JwtSigningKey must be a Base64 string.");
         if (Encoding.UTF8.GetByteCount(api.PlaybackUrlSigningKey) < 32)
             errors.Add("Api PlaybackUrlSigningKey must contain at least 32 characters.");
         if (api.PlaybackUrlLifetimeMinutes <= 0)
             errors.Add("Api PlaybackUrlLifetimeMinutes must be positive.");
-        if (api.ApiKeys.Count == 0)
-            errors.Add("At least one ApiKeys entry is required.");
-
-        foreach (var key in api.ApiKeys)
-        {
-            if (key is null)
-            {
-                errors.Add("Each ApiKeys entry must be a JSON object.");
-                continue;
-            }
-
-            if (string.IsNullOrWhiteSpace(key.Name))
-                errors.Add("Each API key must have a Name.");
-            if (!IsBase64(key.Salt))
-                errors.Add($"API key {key.Name} Salt must be a Base64 string.");
-            if (!IsBase64(key.Hash))
-                errors.Add($"API key {key.Name} Hash must be a Base64 string.");
-            if (key.Iterations <= 0)
-                errors.Add($"API key {key.Name} Iterations must be positive.");
-        }
     }
 
     private static void ValidateDuplicateCameraNames(List<CameraOptions> cameras, List<string> errors)

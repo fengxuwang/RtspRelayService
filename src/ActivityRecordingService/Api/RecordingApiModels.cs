@@ -1,20 +1,24 @@
 namespace ActivityRecordingService.Api;
 
+using System.Text.Json.Serialization;
+
 /// <summary>
-/// Non-secret identity values shared by token issuance and JWT Bearer validation.
+/// 51banshou 统一响应包装，对齐 management-api 的 ResponseResult：
+/// 成功 code=0、载荷在 data；字段名 error_description 保持后端惯例的下划线风格。
 /// </summary>
-public static class RecordingApiSecurity
+public sealed record ApiResult<T>(
+    [property: JsonPropertyName("code")] int Code,
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("error_description")] string? ErrorDescription,
+    [property: JsonPropertyName("trackId")] string TrackId,
+    [property: JsonPropertyName("data")] T? Data)
 {
-    public const string JwtIssuer = "activity-recording-service";
-    public const string JwtAudience = "activity-recording-service-clients";
+    public static ApiResult<T> Ok(T data) => new(0, null, null, Guid.NewGuid().ToString(), data);
 }
 
-public sealed record TokenRequest(string ApiKey);
-
-public sealed record TokenResponse(
-    string TokenType,
-    string AccessToken,
-    DateTimeOffset ExpiresAt);
+public sealed record CameraResponse(
+    string Name,
+    string DisplayName);
 
 public sealed record EventPageResponse(
     IReadOnlyList<EventResponse> Items,

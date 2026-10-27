@@ -1,7 +1,8 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Security.Cryptography;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Globalization;
@@ -48,82 +49,77 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     }
 
     [Fact]
-    public async Task Token_WithValidApiKey_ReturnsJwtForEventMetadata()
+    public async Task Events_WithRawAuthorizationHeader_IsAccepted()
     {
-        var seed = Seed();
-        using var client = _factory.CreateClient();
-        var requestStartedUtc = DateTimeOffset.UtcNow;
+        Seed();
+        using var client = _factory.CreateAuthorizedClientWithRawAuthorizationHeader();
 
-        var response = await client.PostAsJsonAsync(
-            "/recordings/api/auth/token",
-            new { apiKey = RecordingApiFactory.PresentedApiKey });
-
+        var response = await client.GetAsync("/recordings/api/events?offset=0&limit=20");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        var token = await response.Content.ReadFromJsonAsync<TokenResponseForTest>();
-        token.Should().NotBeNull();
-        token!.TokenType.Should().Be("Bearer");
-        token.AccessToken.Should().NotBeNullOrWhiteSpace();
-        ParseApiTime(token.ExpiresAt).Should().BeOnOrAfter(requestStartedUtc.AddMinutes(14));
-        ParseApiTime(token.ExpiresAt).Should().BeOnOrBefore(DateTimeOffset.UtcNow.AddMinutes(15));
-
-        client.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", token.AccessToken);
-        var listResponse = await client.GetAsync("/recordings/api/events?offset=0&limit=20");
-        listResponse.StatusCode.Should().Be(HttpStatusCode.OK);
-        var page = await listResponse.Content.ReadFromJsonAsync<EventPageResponseForTest>();
-        page!.Items.Select(item => item.EventId).Should().Contain(seed.Event.EventId);
     }
 
     [Theory]
-    [InlineData("")]
-    [InlineData("wrong-key")]
-    public async Task Token_WithInvalidApiKey_Returns401(string presentedKey)
+    [InlineData(null)]
+    [InlineData("refresh_token")]
+    public async Task Events_WithNonAccessTokenJwtType_Return401(string? tokenType)
     {
-        using var client = _factory.CreateClient();
+        Seed();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer", _factory.CreateTestToken(DateTimeOffset.UtcNow.AddMinutes(15), tokenType));
 
-        var response = await client.PostAsJsonAsync(
-            "/recordings/api/auth/token",
-            new { apiKey = presentedKey });
-
+        var response = await client.GetAsync("/recordings/api/events?offset=0&limit=20");
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
     [Fact]
-    public async Task Token_WithInvalidRequestShape_Returns400()
+    public async Task Cameras_WithBearerJwt_ReturnsConfiguredCameras()
     {
-        using var client = _factory.CreateClient();
+        using var client = _factory.CreateAuthorizedClient();
 
-        var malformed = await client.PostAsync(
-            "/recordings/api/auth/token",
-            new StringContent("{", Encoding.UTF8, "application/json"));
-        malformed.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var response = await client.GetAsync("/recordings/api/cameras");
 
-        var missingKey = await client.PostAsJsonAsync(
-            "/recordings/api/auth/token",
-            new { });
-        missingKey.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var result = (await response.Content.ReadFromJsonAsync<ApiResultForTest<List<CameraResponseForTest>>>())!.Data!;
+        var camera = result.Should().ContainSingle().Subject;
+        camera.Name.Should().Be("front-door");
+        camera.DisplayName.Should().Be("前门");
     }
 
     [Fact]
-    public async Task Events_WithValidJwt_ReturnsRequestedPage()
+    public async Task Events_WithRecordingRows_HidesOngoingEvents()
+    {
+        _factory.Repository.Events.Add(
+            NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-1)));
+        using var client = _factory.CreateAuthorizedClient();
+
+        var response = await client.GetAsync("/recordings/api/events");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page = (await response.Content.ReadFromJsonAsync<ApiResultForTest<EventPageResponseForTest>>())!.Data!;
+        page.Items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Events_WithBearerJwt_ReturnsRequestedPage()
     {
         var events = new[]
         {
-            NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-30)),
-            NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-20)),
-            NewEvent(Guid.NewGuid(), "yard", _factory.Now.AddMinutes(-10))
+            NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-30), _factory.Now.AddMinutes(-28)),
+            NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-20), _factory.Now.AddMinutes(-18)),
+            NewEvent(Guid.NewGuid(), "yard", _factory.Now.AddMinutes(-10), _factory.Now.AddMinutes(-9))
         };
         foreach (var item in events)
         {
             _factory.Repository.Events.Add(item);
         }
 
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
         var response = await client.GetAsync(
             "/recordings/api/events?camera=front-door&offset=1&limit=1");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        var page = await response.Content.ReadFromJsonAsync<EventPageResponseForTest>();
+        var page = (await response.Content.ReadFromJsonAsync<ApiResultForTest<EventPageResponseForTest>>())!.Data!;
         page!.Offset.Should().Be(1);
         page.Limit.Should().Be(1);
         page.Items.Should().ContainSingle().Which.EventId.Should().Be(events[0].EventId);
@@ -137,13 +133,14 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
             .Select(index => NewEvent(
                 Guid.NewGuid(),
                 "front-door",
-                _factory.Now.AddMinutes(-index))));
-        using var client = await _factory.CreateAuthorizedClientAsync();
+                _factory.Now.AddMinutes(-index),
+                _factory.Now.AddMinutes(-index).AddMinutes(1))));
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync("/recordings/api/events");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        var page = await response.Content.ReadFromJsonAsync<EventPageResponseForTest>();
+        var page = (await response.Content.ReadFromJsonAsync<ApiResultForTest<EventPageResponseForTest>>())!.Data!;
         page!.Offset.Should().Be(0);
         page.Limit.Should().Be(20);
         page.Items.Should().HaveCount(20);
@@ -152,21 +149,21 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     [Fact]
     public async Task Events_WithDeletedRows_ReturnsFullPageOfActiveEvents()
     {
-        var newest = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-1));
-        var deleted = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-2)) with
+        var newest = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-1), _factory.Now);
+        var deleted = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-2), _factory.Now.AddMinutes(-1)) with
         {
             Status = EventStatus.Deleted
         };
-        var firstOlderActive = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-3));
-        var secondOlderActive = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-4));
+        var firstOlderActive = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-3), _factory.Now.AddMinutes(-2));
+        var secondOlderActive = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-4), _factory.Now.AddMinutes(-3));
         _factory.Repository.Events.AddRange(
             [newest, deleted, firstOlderActive, secondOlderActive]);
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync("/recordings/api/events?offset=1&limit=2");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        var page = await response.Content.ReadFromJsonAsync<EventPageResponseForTest>();
+        var page = (await response.Content.ReadFromJsonAsync<ApiResultForTest<EventPageResponseForTest>>())!.Data!;
         page!.Items.Select(item => item.EventId)
             .Should().Equal(firstOlderActive.EventId, secondOlderActive.EventId);
     }
@@ -178,7 +175,7 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     [InlineData("fromUtc=2026-09-29T10:00:00Z", "toUtc=2026-09-29T09:00:00Z")]
     public async Task Events_WithInvalidQuery_Returns400(string first, string second)
     {
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync($"/recordings/api/events?{first}&{second}");
 
@@ -189,12 +186,12 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     public async Task EventDetail_ReturnsEventAndAllIndexedFiles()
     {
         var seed = Seed();
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync($"/recordings/api/events/{seed.Event.EventId}");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        var result = await response.Content.ReadFromJsonAsync<EventResponseForTest>();
+        var result = (await response.Content.ReadFromJsonAsync<ApiResultForTest<EventResponseForTest>>())!.Data!;
         result!.EventId.Should().Be(seed.Event.EventId);
         result.CameraName.Should().Be(seed.Event.CameraName);
         result.CameraDisplayName.Should().Be("前门");
@@ -210,7 +207,7 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
         var eventId = Guid.NewGuid();
         _factory.Repository.Events.Add(
             NewEvent(eventId, "front-door", startedUtc, endedUtc));
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync($"/recordings/api/events/{eventId}");
 
@@ -218,11 +215,13 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
         using var document = JsonDocument.Parse(
             await response.Content.ReadAsStringAsync());
         var startedAt = document.RootElement
+            .GetProperty("data")
             .GetProperty("startedAt")
             .GetString()
             .Should().NotBeNull().And.Subject;
         startedAt.Should().Be("2026-09-29 09:30:00");
         var endedAt = document.RootElement
+            .GetProperty("data")
             .GetProperty("endedAt")
             .GetString()
             .Should().NotBeNull().And.Subject;
@@ -234,12 +233,12 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     {
         var seed = Seed();
         _factory.Repository.Files.Add(NewReadyFile(Guid.NewGuid(), seed.OtherEvent.EventId));
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync("/recordings/api/files?limit=10");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        var page = await response.Content.ReadFromJsonAsync<FilePageResponseForTest>();
+        var page = (await response.Content.ReadFromJsonAsync<ApiResultForTest<FilePageResponseForTest>>())!.Data!;
         page!.Offset.Should().Be(0);
         page.Limit.Should().Be(10);
         var items = page.Items.Should().HaveCount(3).And.Subject.ToList();
@@ -269,12 +268,12 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     public async Task Files_WithCameraFilter_ReturnsOnlyThatCamera()
     {
         var seed = Seed();
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync("/recordings/api/files?camera=front-door");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        var page = await response.Content.ReadFromJsonAsync<FilePageResponseForTest>();
+        var page = (await response.Content.ReadFromJsonAsync<ApiResultForTest<FilePageResponseForTest>>())!.Data!;
         page!.Items.Should().HaveCount(2);
         page.Items.Should().OnlyContain(item => item.CameraName == "front-door");
     }
@@ -282,7 +281,7 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     [Fact]
     public async Task EventDetail_WhenMissing_Returns404()
     {
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync($"/recordings/api/events/{Guid.NewGuid()}");
 
@@ -295,7 +294,7 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
         var seed = Seed();
         _factory.Repository.Events.Remove(seed.Event);
         _factory.Repository.Events.Add(seed.Event with { Status = EventStatus.Deleted });
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var detail = await client.GetAsync($"/recordings/api/events/{seed.Event.EventId}");
         var playback = await client.GetAsync($"/recordings/api/events/{seed.Event.EventId}/playback-urls");
@@ -309,12 +308,13 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     {
         var seed = Seed();
         _factory.Repository.Files.Add(NewReadyFile(Guid.NewGuid(), seed.OtherEvent.EventId));
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync($"/recordings/api/events/{seed.Event.EventId}/playback-urls");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
-        var urls = await response.Content.ReadFromJsonAsync<List<PlaybackUrlResponseForTest>>();
+        var urls = (await response.Content
+            .ReadFromJsonAsync<ApiResultForTest<List<PlaybackUrlResponseForTest>>>())!.Data!;
         var url = urls.Should().ContainSingle().Which;
         url.FileId.Should().Be(seed.ReadyFile.FileId);
         url.PartIndex.Should().Be(seed.ReadyFile.PartIndex);
@@ -329,7 +329,7 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     [Fact]
     public async Task PlaybackUrls_WhenEventMissing_Returns404()
     {
-        using var client = await _factory.CreateAuthorizedClientAsync();
+        using var client = _factory.CreateAuthorizedClient();
 
         var response = await client.GetAsync($"/recordings/api/events/{Guid.NewGuid()}/playback-urls");
 
@@ -606,10 +606,9 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
         RecordingFileRecord ReadyFile,
         RecordingFileRecord FailedFile);
 
-    private sealed record TokenResponseForTest(
-        string TokenType,
-        string AccessToken,
-        string ExpiresAt);
+    private sealed record ApiResultForTest<T>(int Code, T Data);
+
+    private sealed record CameraResponseForTest(string Name, string DisplayName);
 
     private sealed record EventPageResponseForTest(
         IReadOnlyList<EventResponseForTest> Items,
@@ -669,7 +668,6 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
 
 public sealed class RecordingApiFactory : WebApplicationFactory<Program>
 {
-    public const string PresentedApiKey = "test-recording-api-client-key-0123456789";
     public static readonly byte[] FileBytes = "01234567"u8.ToArray();
     private static readonly DateTimeOffset InitialNow =
         DateTimeOffset.Parse("2026-09-29T10:00:00Z");
@@ -693,8 +691,7 @@ public sealed class RecordingApiFactory : WebApplicationFactory<Program>
 
         Api = new ApiOptions
         {
-            JwtSigningKey = "unit-test-jwt-signing-key-0123456789abcdef",
-            JwtLifetimeMinutes = 15,
+            JwtSigningKey = "dW5pdC10ZXN0LWp3dC1zaWduaW5nLWtleS0wMTIzNDU2Nzg5YWJjZGVm",
             PlaybackUrlSigningKey = "unit-test-playback-signing-key-0123456789abcdef",
             PlaybackUrlLifetimeMinutes = 10,
             PublicBasePath = "/recordings"
@@ -709,7 +706,6 @@ public sealed class RecordingApiFactory : WebApplicationFactory<Program>
             Name = "front-door",
             DisplayName = "前门"
         });
-        Api.ApiKeys.Add(CreateConfiguredApiKey("playback-client", PresentedApiKey));
         Repository = new InMemoryEventRepository();
         Signer = new PlaybackUrlSigner(Time, Api);
         Health = new HealthResponse(
@@ -750,17 +746,50 @@ public sealed class RecordingApiFactory : WebApplicationFactory<Program>
         Time.Set(InitialNow);
     }
 
-    public async Task<HttpClient> CreateAuthorizedClientAsync()
+    public HttpClient CreateAuthorizedClient()
     {
         var client = CreateClient();
-        var response = await client.PostAsJsonAsync(
-            "/recordings/api/auth/token",
-            new { apiKey = PresentedApiKey });
-        response.EnsureSuccessStatusCode();
-        var token = await response.Content.ReadFromJsonAsync<TokenResponse>();
-        client.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", token!.AccessToken);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer", CreateTestToken(DateTimeOffset.UtcNow.AddMinutes(15)));
         return client;
+    }
+
+    public HttpClient CreateAuthorizedClientWithRawAuthorizationHeader()
+    {
+        var client = CreateClient();
+        // 51banshou clients send the raw token without a "Bearer " prefix.
+        client.DefaultRequestHeaders.TryAddWithoutValidation(
+            "Authorization", CreateTestToken(DateTimeOffset.UtcNow.AddMinutes(15)));
+        return client;
+    }
+
+    public string CreateTestToken(
+        DateTimeOffset expiresAtUtc,
+        string? tokenType = Program.OAuthAccessTokenType)
+    {
+        // The JWT bearer handler validates exp against the real system clock
+        // (not MutableTimeProvider), so stamp the token with real time.
+        var nowUtc = DateTimeOffset.UtcNow;
+        var signingCredentials = new SigningCredentials(
+            new SymmetricSecurityKey(Convert.FromBase64String(Api.JwtSigningKey)),
+            SecurityAlgorithms.HmacSha256);
+        var header = new JwtHeader(signingCredentials);
+        if (tokenType is not null)
+        {
+            // Mirrors the 51banshou-oauth issuer: jjwt 0.7.0 Header.JWT_TYPE
+            // maps to the "JWT" header param.
+            header[Program.JjwtTokenTypeHeader] = tokenType;
+        }
+
+        var payload = new JwtPayload(
+            null,
+            null,
+            [new Claim("sub", "test-client")],
+            nowUtc.UtcDateTime,
+            expiresAtUtc.UtcDateTime,
+            nowUtc.UtcDateTime);
+        var handler = new JwtSecurityTokenHandler();
+        return handler.WriteToken(new JwtSecurityToken(header, payload));
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -773,9 +802,6 @@ public sealed class RecordingApiFactory : WebApplicationFactory<Program>
             services.AddRouting();
             services.AddRecordingApiJsonOptions();
             services.AddSingleton<TimeProvider>(Time);
-            services.AddSingleton(new ApiKeyAuthenticator());
-            services.AddSingleton(new ApiKeyRateLimiter(Time, 10_000, TimeSpan.FromMinutes(1)));
-            services.AddSingleton(new JwtTokenIssuer(TimeProvider.System, Api));
             services.AddSingleton(Signer);
             services.AddSingleton<IEventRepository>(Repository);
             services.AddSingleton(Health);
@@ -784,28 +810,11 @@ public sealed class RecordingApiFactory : WebApplicationFactory<Program>
 
             services
                 .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-                .AddJwtBearer(options =>
-                {
-                    options.TokenValidationParameters = new TokenValidationParameters
-                    {
-                        ValidIssuer = RecordingApiSecurity.JwtIssuer,
-                        ValidAudience = RecordingApiSecurity.JwtAudience,
-                        IssuerSigningKey = new SymmetricSecurityKey(
-                            Encoding.UTF8.GetBytes(Api.JwtSigningKey)),
-                        ValidateIssuer = true,
-                        ValidateAudience = true,
-                        ValidateIssuerSigningKey = true,
-                        ValidateLifetime = true,
-                        ClockSkew = TimeSpan.Zero
-                    };
-                });
+                .AddJwtBearer(ConfigureTestJwtBearer);
             services.AddAuthorization();
         });
         var apiApplicationBuilder = WebApplication.CreateBuilder();
         apiApplicationBuilder.Services.AddSingleton<TimeProvider>(Time);
-        apiApplicationBuilder.Services.AddSingleton(new ApiKeyAuthenticator());
-        apiApplicationBuilder.Services.AddSingleton(new ApiKeyRateLimiter(Time, 10_000, TimeSpan.FromMinutes(1)));
-        apiApplicationBuilder.Services.AddSingleton(new JwtTokenIssuer(TimeProvider.System, Api));
         apiApplicationBuilder.Services.AddSingleton(Signer);
         apiApplicationBuilder.Services.AddSingleton<IEventRepository>(Repository);
         apiApplicationBuilder.Services.AddSingleton(Health);
@@ -813,17 +822,7 @@ public sealed class RecordingApiFactory : WebApplicationFactory<Program>
         apiApplicationBuilder.Services.AddSingleton(Microsoft.Extensions.Options.Options.Create(Options));
         apiApplicationBuilder.Services
             .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer(options =>
-            {
-                options.TokenValidationParameters = new TokenValidationParameters
-                {
-                    ValidIssuer = RecordingApiSecurity.JwtIssuer,
-                    ValidAudience = RecordingApiSecurity.JwtAudience,
-                    IssuerSigningKey = new SymmetricSecurityKey(
-                        Encoding.UTF8.GetBytes(Api.JwtSigningKey)),
-                    ClockSkew = TimeSpan.Zero
-                };
-            });
+            .AddJwtBearer(ConfigureTestJwtBearer);
         apiApplicationBuilder.Services.AddAuthorization();
         var apiApplication = apiApplicationBuilder.Build();
         RecordingApi.Map(apiApplication);
@@ -841,6 +840,45 @@ public sealed class RecordingApiFactory : WebApplicationFactory<Program>
                 }
             });
         });
+    }
+
+    private void ConfigureTestJwtBearer(JwtBearerOptions options)
+    {
+        // Mirrors Program.cs: tokens come from the 51banshou-oauth issuer.
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = false,
+            ValidateAudience = false,
+            ValidateIssuerSigningKey = true,
+            ValidateLifetime = true,
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Convert.FromBase64String(Api.JwtSigningKey)),
+            ClockSkew = TimeSpan.FromMinutes(1)
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var authorization = context.Request.Headers.Authorization.ToString();
+                if (authorization.Length > 0 &&
+                    !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Token = authorization;
+                }
+
+                return Task.CompletedTask;
+            },
+            OnTokenValidated = context =>
+            {
+                var tokenType = Program.GetJjwtTokenType(context.SecurityToken);
+                if (!string.Equals(tokenType, Program.OAuthAccessTokenType, StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Fail("Token is not an OAuth access token.");
+                }
+
+                return Task.CompletedTask;
+            }
+        };
     }
 
     protected override void Dispose(bool disposing)
@@ -867,27 +905,6 @@ public sealed class RecordingApiFactory : WebApplicationFactory<Program>
         catch (FileNotFoundException)
         {
         }
-    }
-
-    private sealed record TokenResponse(string TokenType, string AccessToken, string ExpiresAtUtc);
-
-    private static ApiKeyOptions CreateConfiguredApiKey(string name, string key)
-    {
-        var salt = RandomNumberGenerator.GetBytes(16);
-        var hash = Rfc2898DeriveBytes.Pbkdf2(
-            Encoding.UTF8.GetBytes(key),
-            salt,
-            210_000,
-            HashAlgorithmName.SHA256,
-            32);
-
-        return new ApiKeyOptions
-        {
-            Name = name,
-            Salt = Convert.ToBase64String(salt),
-            Hash = Convert.ToBase64String(hash),
-            Iterations = 210_000
-        };
     }
 
     private sealed class FixedHealthMonitor(HealthResponse health) : IRecordingHealthMonitor

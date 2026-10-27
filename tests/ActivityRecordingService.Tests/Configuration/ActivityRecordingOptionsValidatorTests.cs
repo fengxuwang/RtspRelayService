@@ -279,17 +279,10 @@ public sealed class ActivityRecordingOptionsValidatorTests : IDisposable
             Api =
             {
                 Host = "10.8.0.2",
-                JwtSigningKey = "this-is-a-valid-jwt-signing-key-0123456789",
+                JwtSigningKey = "dW5pdC10ZXN0LWp3dC1zaWduaW5nLWtleS0wMTIzNDU2Nzg5YWJjZGVm",
                 PlaybackUrlSigningKey = "this-is-a-valid-playback-signing-key-0123456789"
             }
         };
-        options.Api.ApiKeys.Add(new ApiKeyOptions
-        {
-            Name = "playback-client",
-            Salt = "Y2FtZXJhLXNhbHQtdmFsdWU=",
-            Hash = "Y2FtZXJhLWhhc2gtdmFsdWUtZm9yLXRlc3Rz",
-            Iterations = 210_000
-        });
         return options;
     }
 

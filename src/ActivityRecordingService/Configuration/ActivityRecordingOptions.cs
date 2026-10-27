@@ -49,19 +49,11 @@ public sealed class ApiOptions
     public string Host { get; set; } = "10.8.0.2";
     public int Port { get; set; } = 5090;
     public string PublicBasePath { get; set; } = "/recordings";
+    // Base64-encoded HMAC key shared with the 51banshou-oauth service
+    // (its token.private_key); JWTs are issued there and only validated here.
     public string JwtSigningKey { get; set; } = "";
-    public int JwtLifetimeMinutes { get; set; } = 15;
     public string PlaybackUrlSigningKey { get; set; } = "";
     public int PlaybackUrlLifetimeMinutes { get; set; } = 10;
-    public List<ApiKeyOptions> ApiKeys { get; set; } = [];
-}
-
-public sealed class ApiKeyOptions
-{
-    public string Name { get; set; } = "";
-    public string Salt { get; set; } = "";
-    public string Hash { get; set; } = "";
-    public int Iterations { get; set; } = 210_000;
 }
 
 public sealed class CameraOptions

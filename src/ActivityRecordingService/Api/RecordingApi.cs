@@ -19,31 +19,13 @@ public static class RecordingApi
 
         var api = app.MapGroup("/recordings/api");
 
-        api.MapPost("/auth/token", (
-            TokenRequest request,
-            HttpContext httpContext,
-            ApiKeyAuthenticator authenticator,
-            JwtTokenIssuer tokenIssuer,
-            ApiKeyRateLimiter rateLimiter,
-            IOptions<ActivityRecordingOptions> options) =>
-        {
-            var decision = rateLimiter.Acquire(
-                httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown");
-            if (!decision.Allowed)
-                return new RateLimitResult(decision.RetryAfter ?? TimeSpan.FromSeconds(1));
-
-            if (request.ApiKey is null)
-                return Results.BadRequest();
-
-            var credentialName = authenticator.Verify(
-                request.ApiKey,
-                options.Value.Api.ApiKeys);
-            if (credentialName is null)
-                return Results.Unauthorized();
-
-            var token = tokenIssuer.CreateToken(credentialName);
-            return Results.Ok(new TokenResponse("Bearer", token.Token, token.ExpiresAtUtc));
-        });
+        api.MapGet("/cameras", (IOptions<ActivityRecordingOptions> options) =>
+            Results.Ok(ApiResult<CameraResponse[]>.Ok(options.Value.Cameras
+                .Select(camera => new CameraResponse(
+                    camera.Name,
+                    ResolveCameraDisplayName(camera.Name, options.Value)))
+                .ToArray())))
+            .RequireAuthorization();
 
         api.MapGet("/events", async Task<IResult> (
             string? camera,
@@ -74,7 +56,9 @@ public static class RecordingApi
                 if (batch.Count == 0)
                     break;
 
-                activeEvents.AddRange(batch.Where(item => item.Status != EventStatus.Deleted));
+                // 列表只展示已结束的事件：删除的不可见，进行中的（Recording）对回放无意义
+                activeEvents.AddRange(batch.Where(item =>
+                    item.Status is not (EventStatus.Deleted or EventStatus.Recording)));
                 repositoryOffset += batch.Count;
                 if (batch.Count < MaxPageSize)
                     break;
@@ -87,7 +71,7 @@ public static class RecordingApi
                 responses.Add(ToResponse(item, files.Select(ToFileResponse).ToArray(), options.Value));
             }
 
-            return Results.Ok(new EventPageResponse(responses, offset, limit));
+            return Results.Ok(ApiResult<EventPageResponse>.Ok(new EventPageResponse(responses, offset, limit)));
         }).RequireAuthorization();
 
         api.MapGet("/events/{eventId}", async Task<IResult> (
@@ -101,7 +85,7 @@ public static class RecordingApi
                 return Results.NotFound();
 
             var files = await repository.GetFilesAsync(eventId, cancellationToken);
-            return Results.Ok(ToResponse(item, files.Select(ToFileResponse).ToArray(), options.Value));
+            return Results.Ok(ApiResult<EventResponse>.Ok(ToResponse(item, files.Select(ToFileResponse).ToArray(), options.Value)));
         }).RequireAuthorization();
 
         api.MapGet("/events/{eventId}/playback-urls", async Task<IResult> (
@@ -127,7 +111,7 @@ public static class RecordingApi
                     signer.CreateUrl(options.Value.Api.PublicBasePath, file.FileId, expiresAtUtc),
                     expiresAtUtc))
                 .ToArray();
-            return Results.Ok(urls);
+            return Results.Ok(ApiResult<PlaybackUrlResponse[]>.Ok(urls));
         }).RequireAuthorization();
 
         api.MapGet("/files", async Task<IResult> (
@@ -169,7 +153,7 @@ public static class RecordingApi
                     playable ? expiresAtUtc : null));
             }
 
-            return Results.Ok(new FilePageResponse(responses, offset, limit));
+            return Results.Ok(ApiResult<FilePageResponse>.Ok(new FilePageResponse(responses, offset, limit)));
         }).RequireAuthorization();
 
         api.MapGet("/files/{fileId}/content", async Task<IResult> (
@@ -316,18 +300,6 @@ public static class RecordingApi
             file.PartIndex,
             file.Bytes,
             file.Status.ToString());
-
-    private sealed class RateLimitResult(TimeSpan retryAfter) : IResult
-    {
-        public Task ExecuteAsync(HttpContext httpContext)
-        {
-            httpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-            httpContext.Response.Headers.RetryAfter = ((int)Math.Ceiling(retryAfter.TotalSeconds))
-                .ToString(CultureInfo.InvariantCulture);
-            httpContext.Response.ContentType = "text/plain; charset=utf-8";
-            return httpContext.Response.WriteAsync("Too many token requests.");
-        }
-    }
 
     private static string CreateDownloadName(EventRecord item, RecordingFileRecord file)
     {
