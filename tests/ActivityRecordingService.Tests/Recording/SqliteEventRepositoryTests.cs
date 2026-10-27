@@ -220,11 +220,24 @@ public sealed class SqliteEventRepositoryTests : IDisposable
         var first = await CreateEventAsync(repository, "camera-a", StartedUtc);
         var second = await CreateEventAsync(repository, "camera-a", StartedUtc.AddMinutes(10));
         var otherCamera = await CreateEventAsync(repository, "camera-b", StartedUtc.AddMinutes(10));
+        var pending = await CreateEventAsync(repository, "camera-a", StartedUtc.AddMinutes(10));
+        foreach (var eventId in new[] { first, second, otherCamera })
+        {
+            await repository.CompleteEventAsync(
+                eventId,
+                StartedUtc.AddMinutes(15),
+                EventStatus.Completed,
+                CancellationToken.None);
+        }
+
         await repository.AddFileAsync(CreateFile(first, partIndex: 0, bytes: 64), CancellationToken.None);
         var secondFile = CreateFile(second, partIndex: 0, bytes: 64);
         await repository.AddFileAsync(secondFile, CancellationToken.None);
         await repository.AddFileAsync(
             CreateFile(otherCamera, partIndex: 0, bytes: 64),
+            CancellationToken.None);
+        await repository.AddFileAsync(
+            CreateFile(pending, partIndex: 0, bytes: 64),
             CancellationToken.None);
 
         var files = await repository.ListFileEventsAsync(
@@ -235,6 +248,7 @@ public sealed class SqliteEventRepositoryTests : IDisposable
             limit: 10,
             CancellationToken.None);
 
+        // 录制中（pending）事件的分节文件即使已就绪也不进入列表
         files.Should().ContainSingle().Which.FileId.Should().Be(secondFile.FileId);
     }
 

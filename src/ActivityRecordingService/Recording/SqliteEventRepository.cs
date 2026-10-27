@@ -448,10 +448,12 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
 
         return await ExecuteAsync(async (connection, token) =>
         {
+            // 与 /events 列表口径一致：删除的不可见，进行中（Recording）事件对回放无意义
             var conditions = new List<string>
             {
                 "f.status != 'Deleted'",
-                "e.status != 'Deleted'"
+                "e.status != 'Deleted'",
+                "e.status != 'Recording'"
             };
             if (cameraName is not null)
                 conditions.Add("e.camera_name = $camera_name");

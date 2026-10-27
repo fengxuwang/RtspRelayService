@@ -309,6 +309,23 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     }
 
     [Fact]
+    public async Task Files_ExcludesInProgressEvents()
+    {
+        var seed = Seed();
+        var recordingEvent = NewEvent(Guid.NewGuid(), "front-door", _factory.Now.AddMinutes(-5));
+        _factory.Repository.Events.Add(recordingEvent);
+        _factory.Repository.Files.Add(NewReadyFile(Guid.NewGuid(), recordingEvent.EventId));
+        using var client = _factory.CreateAuthorizedClient();
+
+        var response = await client.GetAsync("/recordings/api/files?camera=front-door");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page = (await response.Content.ReadFromJsonAsync<ApiResultForTest<FilePageResponseForTest>>())!.Data!;
+        page!.Items.Should().HaveCount(2);
+        page.Items.Should().OnlyContain(item => item.EventId != recordingEvent.EventId);
+    }
+
+    [Fact]
     public async Task EventDetail_WhenMissing_Returns404()
     {
         using var client = _factory.CreateAuthorizedClient();
@@ -615,7 +632,7 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
         var eventId = Guid.NewGuid();
         var otherEventId = Guid.NewGuid();
         var @event = NewEvent(eventId, "front-door", _factory.Now.AddMinutes(-30), endedUtc: _factory.Now.AddMinutes(-20));
-        var otherEvent = NewEvent(otherEventId, "yard", _factory.Now.AddMinutes(-10));
+        var otherEvent = NewEvent(otherEventId, "yard", _factory.Now.AddMinutes(-10), endedUtc: _factory.Now.AddMinutes(-5));
         _factory.Repository.Events.AddRange([@event, otherEvent]);
 
         var readyFile = NewReadyFile(Guid.NewGuid(), eventId);
@@ -1067,7 +1084,7 @@ public sealed class InMemoryEventRepository : IEventRepository
         var items = Files
             .Where(file => file.Status != RecordingFileStatus.Deleted)
             .Join(
-                Events.Where(item => item.Status != EventStatus.Deleted),
+                Events.Where(item => item.Status is not (EventStatus.Deleted or EventStatus.Recording)),
                 file => file.EventId,
                 item => item.EventId,
                 (file, item) => new FileEventItem(
