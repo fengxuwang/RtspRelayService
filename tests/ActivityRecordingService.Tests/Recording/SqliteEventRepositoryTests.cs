@@ -253,6 +253,45 @@ public sealed class SqliteEventRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task ListFileEvents_PrefersFileTimesAndFallsBackToEventTimes()
+    {
+        await using var repository = await CreateRepositoryAsync();
+        await repository.UpsertCameraAsync("camera-a", true, null, CancellationToken.None);
+        var @event = await CreateEventAsync(repository, "camera-a", StartedUtc);
+        await repository.CompleteEventAsync(
+            @event,
+            StartedUtc.AddMinutes(30),
+            EventStatus.Completed,
+            CancellationToken.None);
+
+        var withTimes = CreateFile(
+            @event,
+            partIndex: 0,
+            bytes: 64,
+            StartedUtc.AddMinutes(1),
+            StartedUtc.AddMinutes(11));
+        var legacy = CreateFile(@event, partIndex: 1, bytes: 64);
+        await repository.AddFileAsync(withTimes, CancellationToken.None);
+        await repository.AddFileAsync(legacy, CancellationToken.None);
+
+        var files = await repository.ListFileEventsAsync(
+            null,
+            null,
+            null,
+            offset: 0,
+            limit: 10,
+            CancellationToken.None);
+
+        files.Should().HaveCount(2);
+        var newFile = files.Single(item => item.FileId == withTimes.FileId);
+        newFile.StartedUtc.Should().Be(StartedUtc.AddMinutes(1));
+        newFile.EndedUtc.Should().Be(StartedUtc.AddMinutes(11));
+        var legacyFile = files.Single(item => item.FileId == legacy.FileId);
+        legacyFile.StartedUtc.Should().Be(StartedUtc);
+        legacyFile.EndedUtc.Should().Be(StartedUtc.AddMinutes(30));
+    }
+
+    [Fact]
     public async Task DeleteEvent_RemovesFileRowsAndMarksEventDeleted()
     {
         await using var repository = await CreateRepositoryAsync();
@@ -371,13 +410,17 @@ public sealed class SqliteEventRepositoryTests : IDisposable
     private static RecordingFileRecord CreateFile(
         Guid eventId,
         int partIndex,
-        long bytes) => new(
+        long bytes,
+        DateTimeOffset? startedUtc = null,
+        DateTimeOffset? endedUtc = null) => new(
             Guid.NewGuid(),
             eventId,
             partIndex,
             $"events/camera-a/part-{partIndex:000}.mp4",
             bytes,
-            RecordingFileStatus.Ready);
+            RecordingFileStatus.Ready,
+            startedUtc,
+            endedUtc);
 
     private static SqliteConnection GetActiveConnection(
         SqliteEventRepository repository) =>

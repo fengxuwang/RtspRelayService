@@ -34,7 +34,9 @@ public sealed record RecordingFileRecord(
     int PartIndex,
     string RelativePath,
     long Bytes,
-    RecordingFileStatus Status);
+    RecordingFileStatus Status,
+    DateTimeOffset? StartedUtc = null,
+    DateTimeOffset? EndedUtc = null);
 
 public sealed record FileEventItem(
     Guid FileId,

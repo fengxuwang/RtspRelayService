@@ -424,6 +424,32 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     }
 
     [Fact]
+    public async Task FileContent_WithFileTimes_UsesPartTimesInName()
+    {
+        var seed = Seed();
+        // 07:00Z = 北京时间 15:00；分节自带时间时下载名用分节起止，无需 -partN 后缀
+        var partStart = new DateTimeOffset(2026, 10, 27, 7, 0, 0, TimeSpan.Zero);
+        var file = seed.ReadyFile with
+        {
+            FileId = Guid.NewGuid(),
+            StartedUtc = partStart,
+            EndedUtc = partStart.AddMinutes(10)
+        };
+        _factory.Repository.Files.Add(file);
+        var url = _factory.Signer.CreateUrl(
+            "/recordings",
+            file.FileId,
+            _factory.Now.AddMinutes(10)) + "&dl=1";
+        using var client = _factory.CreateClient();
+
+        var response = await client.GetAsync(url);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        response.Content.Headers.ContentDisposition!.FileNameStar.Should()
+            .Be("前门-20261027150000-20261027151000.mp4");
+    }
+
+    [Fact]
     public async Task FileContent_WithByteRange_ReturnsExactRange()
     {
         var seed = Seed();
@@ -1094,8 +1120,8 @@ public sealed class InMemoryEventRepository : IEventRepository
                     file.PartIndex,
                     file.Bytes,
                     file.Status,
-                    item.StartedUtc,
-                    item.EndedUtc,
+                    file.StartedUtc ?? item.StartedUtc,
+                    file.EndedUtc ?? item.EndedUtc,
                     item.Status))
             .Where(entry => cameraName is null || entry.CameraName == cameraName)
             .Where(entry => fromUtc is null || entry.StartedUtc >= fromUtc)

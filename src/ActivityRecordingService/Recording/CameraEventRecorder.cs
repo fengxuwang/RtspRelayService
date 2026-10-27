@@ -297,6 +297,9 @@ public sealed class CameraEventRecorder
             _pendingSegments.ToArray());
         var finalPath = Path.Combine(eventDirectory, $"part-{partIndex:000}.mp4");
         var fileId = Guid.NewGuid();
+        // 分节自身的起止时间：结束=事件起点+已累积时长，开始=结束-当前待写窗口
+        var partEndUtc = _startedUtc!.Value + _eventDuration;
+        var partStartUtc = partEndUtc - _pendingDuration;
         await _repository.AddFileAsync(
             new RecordingFileRecord(
                 fileId,
@@ -304,7 +307,9 @@ public sealed class CameraEventRecorder
                 partIndex,
                 CreateRelativePath(finalPath),
                 Bytes: 0,
-                RecordingFileStatus.Reserved),
+                RecordingFileStatus.Reserved,
+                partStartUtc,
+                partEndUtc),
             cancellationToken);
         _activeReservedFileId = fileId;
         var result = await _partWriter.WriteAsync(request, cancellationToken);

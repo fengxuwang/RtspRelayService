@@ -322,7 +322,8 @@ public static class RecordingApi
             file.Status.ToString());
 
     // 下载文件名：{摄像头显示名}-{开始时间}-{结束时间}.mp4，时间取中国标准时间 yyyyMMddHHmmss。
-    // 多分节事件的事件起止相同，第 2 节起追加 -part{N} 避免重名。
+    // 优先使用分节自身起止时间；旧数据无分节时间时回退事件时间，此时多分节起止相同，
+    // 第 2 节起追加 -part{N} 避免重名。
     private static string CreateDownloadName(
         string cameraDisplayName,
         EventRecord item,
@@ -334,9 +335,11 @@ public static class RecordingApi
         if (cameraName.Length > 40)
             cameraName = cameraName[..40];
 
-        var started = FormatDownloadTime(item.StartedUtc);
-        var ended = FormatDownloadTime(item.EndedUtc ?? item.StartedUtc);
-        var partSuffix = file.PartIndex > 0 ? $"-part{file.PartIndex + 1}" : string.Empty;
+        var started = FormatDownloadTime(file.StartedUtc ?? item.StartedUtc);
+        var ended = FormatDownloadTime(file.EndedUtc ?? item.EndedUtc ?? file.StartedUtc ?? item.StartedUtc);
+        var partSuffix = file.PartIndex > 0 && string.Equals(started, ended, StringComparison.Ordinal)
+            ? $"-part{file.PartIndex + 1}"
+            : string.Empty;
         return $"{cameraName}-{started}-{ended}{partSuffix}.mp4";
     }
 

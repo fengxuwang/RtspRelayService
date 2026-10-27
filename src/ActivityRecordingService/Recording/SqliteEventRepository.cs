@@ -80,6 +80,8 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
                     relative_path TEXT NOT NULL CHECK (relative_path <> ''),
                     bytes INTEGER NOT NULL CHECK (bytes >= 0),
                     status TEXT NOT NULL CHECK (status IN ('Reserved', 'Ready', 'Failed', 'Deleted')),
+                    started_utc TEXT NULL,
+                    ended_utc TEXT NULL,
                     FOREIGN KEY (event_id) REFERENCES events(event_id) ON DELETE CASCADE,
                     UNIQUE (event_id, part_index)
                 );
@@ -107,6 +109,7 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
                 cancellationToken);
 
             await EnsureEndReasonColumnAsync(_connection, cancellationToken);
+            await EnsureFileTimeColumnsAsync(_connection, cancellationToken);
         }
         finally
         {
@@ -228,9 +231,9 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
                 connection,
                 """
                 INSERT INTO recording_files(
-                    file_id, event_id, part_index, relative_path, bytes, status)
+                    file_id, event_id, part_index, relative_path, bytes, status, started_utc, ended_utc)
                 VALUES (
-                    $file_id, $event_id, $part_index, $relative_path, $bytes, $status)
+                    $file_id, $event_id, $part_index, $relative_path, $bytes, $status, $started_utc, $ended_utc)
                 """,
                 token,
                 new SqliteParameter("$file_id", file.FileId.ToString()),
@@ -238,7 +241,13 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
                 new SqliteParameter("$part_index", (long)file.PartIndex),
                 new SqliteParameter("$relative_path", file.RelativePath),
                 new SqliteParameter("$bytes", file.Bytes),
-                new SqliteParameter("$status", ToStorage(file.Status)));
+                new SqliteParameter("$status", ToStorage(file.Status)),
+                new SqliteParameter(
+                    "$started_utc",
+                    MaybeValue(file.StartedUtc.HasValue ? FormatUtc(file.StartedUtc.Value) : null)),
+                new SqliteParameter(
+                    "$ended_utc",
+                    MaybeValue(file.EndedUtc.HasValue ? FormatUtc(file.EndedUtc.Value) : null)));
             return 0;
         }, cancellationToken);
     }
@@ -471,8 +480,8 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
                     f.part_index,
                     f.bytes,
                     f.status,
-                    e.started_utc,
-                    e.ended_utc,
+                    COALESCE(f.started_utc, e.started_utc) AS started_utc,
+                    COALESCE(f.ended_utc, e.ended_utc) AS ended_utc,
                     e.status
                 FROM recording_files AS f
                 JOIN events AS e ON f.event_id = e.event_id
@@ -729,6 +738,29 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
         }
     }
 
+    private static async Task EnsureFileTimeColumnsAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var columnNames = new List<string>();
+        await using var inspect = connection.CreateCommand();
+        inspect.CommandText = "PRAGMA table_info(recording_files);";
+        await using var reader = await inspect.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            columnNames.Add(reader.GetString(1));
+
+        foreach (var column in new[] { "started_utc", "ended_utc" })
+        {
+            if (!columnNames.Contains(column, StringComparer.OrdinalIgnoreCase))
+            {
+                await ExecuteNonQueryAsync(
+                    connection,
+                    $"ALTER TABLE recording_files ADD COLUMN {column} TEXT NULL",
+                    cancellationToken);
+            }
+        }
+    }
+
     private static SqliteCommand CreateEventQuery(
         SqliteConnection connection,
         string tail,
@@ -772,7 +804,7 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         var command = connection.CreateCommand();
         command.CommandText = $"""
-            SELECT file_id, event_id, part_index, relative_path, bytes, status
+            SELECT file_id, event_id, part_index, relative_path, bytes, status, started_utc, ended_utc
             FROM recording_files AS f
             {tail}
             """;
@@ -818,7 +850,9 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
         checked((int)reader.GetInt64(2)),
         reader.GetString(3),
         reader.GetInt64(4),
-        ParseFileStatus(reader.GetString(5)));
+        ParseFileStatus(reader.GetString(5)),
+        reader.IsDBNull(6) ? null : NormalizeUtc(reader.GetDateTimeOffset(6)),
+        reader.IsDBNull(7) ? null : NormalizeUtc(reader.GetDateTimeOffset(7)));
 
     private static DateTimeOffset NormalizeUtc(DateTimeOffset value) =>
         value.ToUniversalTime();
