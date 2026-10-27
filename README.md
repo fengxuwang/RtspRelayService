@@ -45,6 +45,16 @@ dotnet publish src/RtspRelayService/RtspRelayService.csproj \
   -o publish/rtsp-relay/windows-x64
 ```
 
+在 Windows PowerShell 中执行（续行符是反引号，不是 `\`）：
+
+```powershell
+dotnet publish src/RtspRelayService/RtspRelayService.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  -o publish/rtsp-relay/windows-x64
+```
+
 发布结果位于 `publish/rtsp-relay/windows-x64`。由于使用了 `--self-contained true`，其中包含运行所需的 .NET 组件，目标 Windows 主机无须另外安装 .NET 运行时。
 
 ### 准备 Windows 版 FFmpeg
@@ -259,7 +269,7 @@ Get-ChildItem 'E:\RtspRelayService\logs' |
 
 环境要求：.NET 8 SDK、FFmpeg 和一份与人员检测实现兼容的 ONNX 模型文件。
 
-本地开发配置不会被 Git 跟踪。首次开发时从示例配置复制一份并填写真实值（摄像头地址、`RecordingRoot`、`FfmpegPath`、`Detection:ModelPath`、`ApiKeys`、签名密钥等），开发时把服务级和摄像头级 `Enabled` 都设为 `true`：
+本地开发配置不会被 Git 跟踪。首次开发时从示例配置复制一份并填写真实值（摄像头地址、`RecordingRoot`、`FfmpegPath`、`Detection:ModelPath`、`JwtSigningKey`、`PlaybackUrlSigningKey` 等），开发时把服务级和摄像头级 `Enabled` 都设为 `true`：
 
 ```bash
 cp -n src/ActivityRecordingService/appsettings.example.json \
@@ -296,6 +306,16 @@ dotnet publish src/ActivityRecordingService/ActivityRecordingService.csproj \
   -o publish/activity-recording/windows-x64
 ```
 
+在 Windows PowerShell 中执行（续行符是反引号，不是 `\`）：
+
+```powershell
+dotnet publish src/ActivityRecordingService/ActivityRecordingService.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  -o publish/activity-recording/windows-x64
+```
+
 `--self-contained true` 会包含 .NET 8 运行时，目标 Windows 主机不需要另行安装 .NET Runtime。发布目录必须在 Windows 主机上准备好以下布局；不要只复制可执行文件：
 
 ```text
@@ -317,67 +337,36 @@ E:\ActivityRecordingService\
 
 ONNX 模型必须放在 `models\yolo11n.onnx`。只使用来自受信任来源并且与人员检测实现兼容的模型；不要把模型、真实 `appsettings.json`、录像、日志或数据库提交到 Git。如果发布目录包含构建机上的本地 `appsettings.json`，更新部署时必须保留目标主机上已经配置好的那份文件，安装脚本不会覆盖它。
 
+### API 认证与响应格式
+
+服务不提供独立的登录接口，采用 HS256 JWT 共享密钥认证，第三方网站可直接接入：
+
+- 客户端以 `Authorization: <token>` 或 `Authorization: Bearer <token>` 携带 access_token 请求录像 API（两种格式都支持）。
+- 服务用 `JwtSigningKey`（HS256 共享密钥）验证签名和有效期，并校验 JWT header 携带的类型标记为 `access_token`；refresh_token 会被拒绝。
+- 接入步骤：接入方使用与服务端一致的 `JwtSigningKey` 自行签发 JWT——HS256 算法，header 带类型标记 `access_token`，正确设置 `exp`——即可调用全部录像 API，无需在本服务注册账号或回调。密钥只通过线下安全渠道分发给可信接入方。
+- 扩展更多接入方：所有接入方共用一个密钥时无需任何代码改动；需要为不同接入方分配独立密钥或校验 issuer 时，扩展 `Program.cs` 中的 JwtBearer 配置（多密钥可换用自定义 `IssuerSigningKeyResolver`），并同步更新测试。
+- 响应统一为包装格式 `{code, error, error_description, trackId, data}`（成功 `code=0`，载荷在 `data`）。两个例外：`GET /recordings/api/health` 保持裸 JSON 供监控脚本使用；`GET /recordings/api/files/{fileId}/content` 是带签名的 MP4 媒体流。
+- 签名播放 URL（`playbackUrl`）自带 `exp/nonce/signature` 参数，有效期内无需再带认证头。
+
 ### 配置和密钥
 
-首次部署时，把仓库中的 `src/ActivityRecordingService/appsettings.example.json` 复制到安装目录并重命名为 `appsettings.json`，然后只在本机编辑。示例文件中的占位值不能用于生产。真实 API 地址、绑定地址、JWT 签名密钥、播放 URL 签名密钥、API 密钥派生值和摄像头凭据只能保存在这份被忽略的本机文件中。
+首次部署时，把仓库中的 `src/ActivityRecordingService/appsettings.example.json` 复制到安装目录并重命名为 `appsettings.json`，然后只在本机编辑。示例文件中的占位值不能用于生产。真实 API 地址、绑定地址、JWT 签名密钥、播放 URL 签名密钥和摄像头凭据只能保存在这份被忽略的本机文件中。
 
-API 客户端密钥应在安全设备或密钥管理工具中生成并保存。使用随机 256 位密钥和随机 256 位 salt；API 服务保存 Base64 编码的 salt 和 PBKDF2-SHA256 hash，不保存原始密钥。下面命令在 PowerShell 7/.NET 8 中生成一组新值；不要在文档、提交、聊天或共享终端记录中写入已有密钥：
+`JwtSigningKey` 不是本服务独立生成的密钥，必须与 token 签发方使用的密钥完全相同：本服务对该 Base64 字符串解码后作为 HMAC 密钥验证，短于 32 字节的密钥服务端会右侧补零。因此轮换该密钥必须与所有 token 签发方同步进行：签发方换新密钥后，把相同的新值同步到本服务的 `appsettings.json` 并重启，否则所有请求验签失败。
 
-```powershell
-$apiKey = [Convert]::ToHexString(
-  [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-$salt = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
-$iterations = 210000
-$hash = [System.Security.Cryptography.Rfc2898DeriveBytes]::Pbkdf2(
-  [System.Text.Encoding]::UTF8.GetBytes($apiKey),
-  $salt,
-  $iterations,
-  [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-  32)
-[pscustomobject]@{
-  Salt = [Convert]::ToBase64String($salt)
-  Hash = [Convert]::ToBase64String($hash)
-  Iterations = $iterations
-} | ConvertTo-Json
-```
-
-macOS/Linux 上用 Python 生成等价的一组值（PBKDF2-SHA256，参数与服务端一致）：
-
-```bash
-python3 -c "
-import secrets, hashlib, base64
-key = secrets.token_urlsafe(32)
-salt = secrets.token_bytes(32)
-h = hashlib.pbkdf2_hmac('sha256', key.encode(), salt, 210000, 32)
-print('Key: ', key)
-print('Salt:', base64.b64encode(salt).decode())
-print('Hash:', base64.b64encode(h).decode())
-"
-```
-
-只在受信任的管理工作站上运行生成命令，立即把 `$apiKey` 存入审批过的密钥管理工具。不要显示、记录、截屏、粘贴、导出或通过聊天、邮件、工单、共享终端历史传输原始 API key。确需转移时，只使用审批过的密钥管理通道；`appsettings.json` 中只写入 `Salt`、`Hash` 和 `Iterations`。轮换密钥时创建新的随机 salt 和 hash，更新客户端后再移除旧条目。
-
-JWT 签名密钥和播放 URL 签名密钥都必须是至少 32 个 UTF-8 字节的独立随机值。两者不能相同，也不要复用 API 客户端密钥。
-
-生成这两把签名密钥（PowerShell 在 Windows 上执行，bash 在 macOS/Linux 上执行）。输出值直接填入 `appsettings.json`，两把各自独立生成：
+`PlaybackUrlSigningKey` 是本服务独立持有的随机密钥，至少 32 个 UTF-8 字节，不要与 `JwtSigningKey` 复用。生成命令（输出值填入 `appsettings.json`）：
 
 ```powershell
-function New-SigningKey {
-    $bytes = [byte[]]::new(48)
-    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-    [Convert]::ToBase64String($bytes)
-}
-
-"JwtSigningKey:      $(New-SigningKey)"
-"PlaybackUrlSigningKey: $(New-SigningKey)"
+$bytes = [byte[]]::new(48)
+[Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+"PlaybackUrlSigningKey: $([Convert]::ToBase64String($bytes))"
 ```
 
 ```bash
-echo "JwtSigningKey:         $(head -c 48 /dev/urandom | base64)"
 echo "PlaybackUrlSigningKey: $(head -c 48 /dev/urandom | base64)"
 ```
 
-换用新的 `JwtSigningKey` 后，所有已签发的 JWT 立即失效，客户端需要重新调用 token 接口换取新令牌；换 `PlaybackUrlSigningKey` 会使已发出的播放直链签名立即失效，重新获取播放 URL 即可。两个密钥都只在服务器本机的 `appsettings.json` 中保存。
+换 `PlaybackUrlSigningKey` 会使已发出的播放直链签名立即失效，重新获取播放 URL 即可。两个密钥都只在服务器本机的 `appsettings.json` 中保存。
 
 ### WireGuard 和 API 绑定
 
@@ -437,7 +426,7 @@ PersistentKeepalive = 25
 
 `AllowedIPs = 10.8.0.1/32` 只把 CentOS 的 WireGuard 地址送入隧道；不要使用 `0.0.0.0/0`、`::/0` 或其他全隧道路由，也不要为播放 API 添加静态默认路由。
 
-Nginx 示例是完整独立配置，便于单独检查；`/recordings`（无尾斜杠）和 `/recordings/` 以外的路径都会返回 `404`，默认 Nginx 文档根目录不会被暴露。如果 CentOS 已有同一域名的 HTTPS `server` 块，不要复制或新增重复 `server_name` 的示例 `server` 块。只把 `limit_conn_zone`、活动录像访问日志 `log_format`（如选择这套日志格式且尚未存在）和完整的 `/recordings/` `location` 块合并进现有配置；TLS、域名和现有 HTTPS 行为留在原有 `server` 块中。示例固定代理路径和上游，只允许 `GET`、隐含的 `HEAD` 和换发 JWT 的 `POST`；转发 `Range` 和 `If-Range`，保留 `Accept-Ranges` 和 `Content-Range` 响应头，限制连接数和请求体大小，并设置上游超时。`proxy_buffering off`、`proxy_cache off` 和 `proxy_max_temp_file_size 0` 防止 CentOS 缓存或落盘代理录像。不要给它添加 `alias`、`root`、`proxy_cache_path` 或其他可访问本地文件的位置。
+Nginx 示例是完整独立配置，便于单独检查；`/recordings`（无尾斜杠）和 `/recordings/` 以外的路径都会返回 `404`，默认 Nginx 文档根目录不会被暴露。如果 CentOS 已有同一域名的 HTTPS `server` 块，不要复制或新增重复 `server_name` 的示例 `server` 块。只把 `limit_conn_zone`、活动录像访问日志 `log_format`（如选择这套日志格式且尚未存在）和完整的 `/recordings/` `location` 块合并进现有配置；TLS、域名和现有 HTTPS 行为留在原有 `server` 块中。示例固定代理路径和上游，只允许 `GET`、隐含的 `HEAD`；转发 `Range` 和 `If-Range`，保留 `Accept-Ranges` 和 `Content-Range` 响应头，限制连接数和请求体大小，并设置上游超时。`proxy_buffering off`、`proxy_cache off` 和 `proxy_max_temp_file_size 0` 防止 CentOS 缓存或落盘代理录像。不要给它添加 `alias`、`root`、`proxy_cache_path` 或其他可访问本地文件的位置。
 
 检查防火墙时，先审计当前生效和永久配置，再删除与目标无关的条目。先确认可以从带外或本地控制台维护主机；是否保留、收紧或移除 SSH 由运维方按现有安全基线决定，本指南不新增也不盲删 SSH 规则。如果保留受控 SSH 管理通道，应使用运维方已批准的来源限制或端口策略，并将其视为管理例外而不是活动录像公共暴露面。
 
@@ -529,7 +518,45 @@ Restart-Service ActivityRecordingService
 
 停止服务会等待事件收尾并结束 FFmpeg 进程树后再退出；修改 `appsettings.json` 后使用 `Restart-Service` 让新配置生效。等价的 `sc.exe` 命令是 `sc.exe start|stop ActivityRecordingService`。
 
-更新程序时先停止服务，复制新的发布文件，保留目标主机的 `appsettings.json`、`models`、`logs` 和录像根目录，然后启动服务。卸载使用：
+### 更新程序
+
+安装脚本只用于首次安装（服务已存在时会报错）；日常更新按下面的流程执行。
+
+在构建机上发布并打包。**必须先删除发布目录中的 `appsettings.json`**——那是构建机上的占位配置，带入目标机会覆盖真实配置：
+
+```powershell
+# 在项目根目录执行
+dotnet publish src/ActivityRecordingService/ActivityRecordingService.csproj `
+  -c Release -r win-x64 --self-contained true `
+  -o publish/activity-recording/windows-x64
+
+# 删除占位配置后再打包
+Remove-Item publish/activity-recording/windows-x64/appsettings.json -ErrorAction SilentlyContinue
+Compress-Archive -Path publish/activity-recording/windows-x64/* `
+  -DestinationPath ActivityRecordingService-update.zip -Force
+```
+
+发布包不包含 `ffmpeg`、`models` 和真实配置——更新时目标机上的这三项天然不会被触碰。
+
+在目标机上更新（管理员 PowerShell）。先停止服务，把新文件解压覆盖到安装目录（不要覆盖目标主机的 `appsettings.json`），再启动：
+
+```powershell
+Stop-Service ActivityRecordingService
+# 解压 zip，覆盖安装目录下的同名文件；跳过目标机已有的 appsettings.json
+Expand-Archive -Path ActivityRecordingService-update.zip `
+  -DestinationPath 'E:\ActivityRecordingService' -Force
+Start-Service ActivityRecordingService
+```
+
+更新后验证：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:5090/recordings/api/health
+```
+
+返回 `status` 为 `Healthy`、`cameraState` 为 `Running` 即更新成功。保留上一版发布包用于回滚：若新版本异常，停止服务、反向覆盖旧版文件、启动服务即可。服务启动时会自动扫描恢复中断的录制（recovery），无需手工处理事件残留。
+
+### 卸载
 
 ```powershell
 .\deploy\windows\uninstall-activity-recording-service.ps1
@@ -543,7 +570,7 @@ Restart-Service ActivityRecordingService
 
 1. 默认安全状态：服务安装后自动启动但保持空闲，`ActivityRecording:Enabled` 与所有摄像头项的 `Enabled` 都是 `false`；日志确认没有启动录像、检测或 FFmpeg 管线。确认配置后按受控流程启用所需摄像头。
 2. 四路稳定性：四台启用摄像头持续运行代表性时长，记录 CPU、专用内存、句柄、FFmpeg 进程数和事件/文件数。期间摄像头故障与恢复，最终没有失控进程、内存持续增长、数据库锁等待或未完成事件泄漏。
-3. 30 秒预录：对每路摄像头触发一次人员活动，检查事件开始时间、预录配置和首个 MP4 内容包含触发前约 30 秒画面；不同摄像头互不串数据。
+3. 预录时长：对每路摄像头触发一次人员活动，检查事件开始时间、`Recording:PreEventSeconds` 配置值和首个 MP4 内容包含触发前约该时长（示例配置为 30 秒）的画面；不同摄像头互不串数据。
 4. 长事件分片：制造超过单个事件分片时长的事件，确认 MP4 parts 的编号、时长、字节数和状态连续可播，超过 2 小时上限或单 part 上限时正确结束或分片，没有丢失或不完整 part 被返回播放。
 5. 磁盘水位：核对配额、保留期和 60 GiB 最低空闲水位。用受控测试卷或配额让可用空间到达水位，确认新事件被阻止、`/recordings/api/health` 显示阻断原因、每小时清理和保留期删除释放空间后恢复，且删除只发生在 `RecordingRoot` 内。
 6. 断线恢复：断开 RTSP、WireGuard 可用性和 Windows 网络后恢复连接，确认检测管线退避重连、事件不重叠、SQLite 事务一致，API 最终能列出事件。
