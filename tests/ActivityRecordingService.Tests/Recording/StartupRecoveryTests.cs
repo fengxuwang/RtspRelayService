@@ -437,6 +437,8 @@ public sealed class StartupRecoveryTests : IDisposable
 
         public Task<IReadOnlyList<FileEventItem>> ListFileEventsAsync(
             string? cameraName,
+            DateTimeOffset? fromUtc,
+            DateTimeOffset? toUtc,
             int offset,
             int limit,
             CancellationToken cancellationToken) =>

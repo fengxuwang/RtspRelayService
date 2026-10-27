@@ -212,6 +212,33 @@ public sealed class SqliteEventRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task ListFileEvents_FiltersCameraAndTimeRange()
+    {
+        await using var repository = await CreateRepositoryAsync();
+        await repository.UpsertCameraAsync("camera-a", true, null, CancellationToken.None);
+        await repository.UpsertCameraAsync("camera-b", true, null, CancellationToken.None);
+        var first = await CreateEventAsync(repository, "camera-a", StartedUtc);
+        var second = await CreateEventAsync(repository, "camera-a", StartedUtc.AddMinutes(10));
+        var otherCamera = await CreateEventAsync(repository, "camera-b", StartedUtc.AddMinutes(10));
+        await repository.AddFileAsync(CreateFile(first, partIndex: 0, bytes: 64), CancellationToken.None);
+        var secondFile = CreateFile(second, partIndex: 0, bytes: 64);
+        await repository.AddFileAsync(secondFile, CancellationToken.None);
+        await repository.AddFileAsync(
+            CreateFile(otherCamera, partIndex: 0, bytes: 64),
+            CancellationToken.None);
+
+        var files = await repository.ListFileEventsAsync(
+            "camera-a",
+            StartedUtc.AddMinutes(1),
+            StartedUtc.AddMinutes(20),
+            offset: 0,
+            limit: 10,
+            CancellationToken.None);
+
+        files.Should().ContainSingle().Which.FileId.Should().Be(secondFile.FileId);
+    }
+
+    [Fact]
     public async Task DeleteEvent_RemovesFileRowsAndMarksEventDeleted()
     {
         await using var repository = await CreateRepositoryAsync();

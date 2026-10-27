@@ -116,6 +116,8 @@ public static class RecordingApi
 
         api.MapGet("/files", async Task<IResult> (
             string? camera,
+            DateTimeOffset? fromUtc,
+            DateTimeOffset? toUtc,
             IEventRepository repository,
             PlaybackUrlSigner signer,
             TimeProvider timeProvider,
@@ -126,12 +128,16 @@ public static class RecordingApi
         {
             if (offset < 0 || offset > int.MaxValue - limit || limit is < 1 or > MaxPageSize)
                 return Results.BadRequest();
+            if (fromUtc > toUtc)
+                return Results.BadRequest();
 
             var apiOptions = options.Value;
             var expiresAtUtc = timeProvider.GetUtcNow().AddMinutes(
                 apiOptions.Api.PlaybackUrlLifetimeMinutes);
             var items = await repository.ListFileEventsAsync(
                 camera,
+                fromUtc,
+                toUtc,
                 offset,
                 limit,
                 cancellationToken);
@@ -156,11 +162,14 @@ public static class RecordingApi
             return Results.Ok(ApiResult<FilePageResponse>.Ok(new FilePageResponse(responses, offset, limit)));
         }).RequireAuthorization();
 
+        // 默认内联返回（无 Content-Disposition），浏览器播放器可边下边播；
+        // dl=1 时改为附件下载并附带友好文件名。
         api.MapGet("/files/{fileId}/content", async Task<IResult> (
             Guid fileId,
             string? exp,
             string? nonce,
             string? signature,
+            string? dl,
             PlaybackUrlSigner signer,
             IEventRepository repository,
             IOptions<ActivityRecordingOptions> options,
@@ -189,10 +198,21 @@ public static class RecordingApi
             if (item is null || item.Status == EventStatus.Deleted)
                 return Results.NotFound();
 
+            if (dl == "1")
+            {
+                return TypedResults.PhysicalFile(
+                    fullPath,
+                    "video/mp4",
+                    CreateDownloadName(
+                        ResolveCameraDisplayName(item.CameraName, options.Value),
+                        item,
+                        file),
+                    enableRangeProcessing: true);
+            }
+
             return TypedResults.PhysicalFile(
                 fullPath,
                 "video/mp4",
-                CreateDownloadName(item, file),
                 enableRangeProcessing: true);
         });
 
@@ -301,14 +321,26 @@ public static class RecordingApi
             file.Bytes,
             file.Status.ToString());
 
-    private static string CreateDownloadName(EventRecord item, RecordingFileRecord file)
+    // 下载文件名：{摄像头显示名}-{开始时间}-{结束时间}.mp4，时间取中国标准时间 yyyyMMddHHmmss。
+    // 多分节事件的事件起止相同，第 2 节起追加 -part{N} 避免重名。
+    private static string CreateDownloadName(
+        string cameraDisplayName,
+        EventRecord item,
+        RecordingFileRecord file)
     {
-        var cameraName = new string(item.CameraName
+        var cameraName = new string(cameraDisplayName
             .Where(character => !Path.GetInvalidFileNameChars().Contains(character))
             .ToArray());
         if (cameraName.Length > 40)
             cameraName = cameraName[..40];
 
-        return $"event-{item.EventId:N}-{cameraName}-part-{file.PartIndex:D3}.mp4";
+        var started = FormatDownloadTime(item.StartedUtc);
+        var ended = FormatDownloadTime(item.EndedUtc ?? item.StartedUtc);
+        var partSuffix = file.PartIndex > 0 ? $"-part{file.PartIndex + 1}" : string.Empty;
+        return $"{cameraName}-{started}-{ended}{partSuffix}.mp4";
     }
+
+    private static string FormatDownloadTime(DateTimeOffset value) =>
+        value.ToOffset(ChinaStandardTimeJsonConverter.Offset)
+            .ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
 }

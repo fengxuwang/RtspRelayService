@@ -431,6 +431,8 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
 
     public async Task<IReadOnlyList<FileEventItem>> ListFileEventsAsync(
         string? cameraName,
+        DateTimeOffset? fromUtc,
+        DateTimeOffset? toUtc,
         int offset,
         int limit,
         CancellationToken cancellationToken)
@@ -439,11 +441,27 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
             throw new ArgumentOutOfRangeException(nameof(offset));
         if (limit <= 0)
             throw new ArgumentOutOfRangeException(nameof(limit));
+        if (fromUtc.HasValue && toUtc.HasValue && fromUtc.Value > toUtc.Value)
+        {
+            throw new ArgumentException("From time must not be later than to time.");
+        }
 
         return await ExecuteAsync(async (connection, token) =>
         {
+            var conditions = new List<string>
+            {
+                "f.status != 'Deleted'",
+                "e.status != 'Deleted'"
+            };
+            if (cameraName is not null)
+                conditions.Add("e.camera_name = $camera_name");
+            if (fromUtc.HasValue)
+                conditions.Add("e.started_utc >= $from_utc");
+            if (toUtc.HasValue)
+                conditions.Add("e.started_utc <= $to_utc");
+
             await using var command = connection.CreateCommand();
-            command.CommandText = """
+            command.CommandText = $"""
                 SELECT
                     f.file_id,
                     f.event_id,
@@ -456,15 +474,19 @@ public sealed class SqliteEventRepository : IEventRepository, IDisposable
                     e.status
                 FROM recording_files AS f
                 JOIN events AS e ON f.event_id = e.event_id
-                WHERE f.status != 'Deleted'
-                  AND e.status != 'Deleted'
-                  AND ($camera_name IS NULL OR e.camera_name = $camera_name)
+                WHERE {string.Join(" AND ", conditions)}
                 ORDER BY e.started_utc DESC, f.part_index ASC
                 LIMIT $limit OFFSET $offset
                 """;
             command.Parameters.AddRange(
             [
                 new SqliteParameter("$camera_name", MaybeValue(cameraName)),
+                new SqliteParameter(
+                    "$from_utc",
+                    MaybeValue(fromUtc.HasValue ? FormatUtc(fromUtc.Value) : null)),
+                new SqliteParameter(
+                    "$to_utc",
+                    MaybeValue(toUtc.HasValue ? FormatUtc(toUtc.Value) : null)),
                 new SqliteParameter("$limit", (long)limit),
                 new SqliteParameter("$offset", (long)offset)
             ]);

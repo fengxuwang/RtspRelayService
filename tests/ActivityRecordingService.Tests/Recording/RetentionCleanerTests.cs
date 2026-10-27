@@ -695,10 +695,12 @@ public sealed class RetentionCleanerTests : IDisposable
 
         public Task<IReadOnlyList<FileEventItem>> ListFileEventsAsync(
             string? cameraName,
+            DateTimeOffset? fromUtc,
+            DateTimeOffset? toUtc,
             int offset,
             int limit,
             CancellationToken cancellationToken) =>
-            _inner.ListFileEventsAsync(cameraName, offset, limit, cancellationToken);
+            _inner.ListFileEventsAsync(cameraName, fromUtc, toUtc, offset, limit, cancellationToken);
 
         public Task<long> GetRecordingBytesAsync(CancellationToken cancellationToken) =>
             _inner.GetRecordingBytesAsync(cancellationToken);

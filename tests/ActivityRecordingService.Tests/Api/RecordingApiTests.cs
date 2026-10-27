@@ -279,6 +279,36 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
     }
 
     [Fact]
+    public async Task Files_WithTimeRange_ReturnsOnlyEventsStartedInRange()
+    {
+        var seed = Seed();
+        _factory.Repository.Files.Add(NewReadyFile(Guid.NewGuid(), seed.OtherEvent.EventId));
+        using var client = _factory.CreateAuthorizedClient();
+        // "O" 格式含 "+08:00" 偏移，query 中 "+" 必须编码否则时区丢失导致 400。
+        var fromUtc = Uri.EscapeDataString(_factory.Now.AddMinutes(-15).ToString("O"));
+        var toUtc = Uri.EscapeDataString(_factory.Now.ToString("O"));
+
+        var response = await client.GetAsync($"/recordings/api/files?fromUtc={fromUtc}&toUtc={toUtc}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page = (await response.Content.ReadFromJsonAsync<ApiResultForTest<FilePageResponseForTest>>())!.Data!;
+        page!.Items.Should().HaveCount(1);
+        page.Items.Should().OnlyContain(item => item.EventId == seed.OtherEvent.EventId);
+    }
+
+    [Fact]
+    public async Task Files_WithInvertedTimeRange_Returns400()
+    {
+        using var client = _factory.CreateAuthorizedClient();
+        var fromUtc = Uri.EscapeDataString(_factory.Now.ToString("O"));
+        var toUtc = Uri.EscapeDataString(_factory.Now.AddMinutes(-15).ToString("O"));
+
+        var response = await client.GetAsync($"/recordings/api/files?fromUtc={fromUtc}&toUtc={toUtc}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
     public async Task EventDetail_WhenMissing_Returns404()
     {
         using var client = _factory.CreateAuthorizedClient();
@@ -352,7 +382,28 @@ public sealed class RecordingApiTests : IClassFixture<RecordingApiFactory>
         response.Content.Headers.ContentType!.MediaType.Should().Be("video/mp4");
         response.Headers.AcceptRanges.Should().Contain("bytes");
         (await response.Content.ReadAsByteArrayAsync()).Should().Equal(RecordingApiFactory.FileBytes);
-        response.Content.Headers.ContentDisposition!.FileName.Should().NotContain(_factory.RecordingRoot);
+        // 默认内联播放：不携带 Content-Disposition，避免浏览器把大文件当下载处理。
+        response.Content.Headers.ContentDisposition.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task FileContent_WithDownloadFlag_ReturnsAttachmentName()
+    {
+        var seed = Seed();
+        var url = _factory.Signer.CreateUrl(
+            "/recordings",
+            seed.ReadyFile.FileId,
+            _factory.Now.AddMinutes(10)) + "&dl=1";
+        using var client = _factory.CreateClient();
+
+        var response = await client.GetAsync(url);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        response.Content.Headers.ContentType!.MediaType.Should().Be("video/mp4");
+        response.Content.Headers.ContentDisposition!.DispositionType.Should().Be("attachment");
+        // 中文名走 filename*（RFC5987），浏览器据此还原；FileName 属性对 RFC2047 的解码会损坏非 ASCII。
+        response.Content.Headers.ContentDisposition.FileNameStar.Should().StartWith("前门-");
+        response.Content.Headers.ContentDisposition.FileNameStar.Should().MatchRegex(@"-\d{14}-\d{14}\.mp4$");
     }
 
     [Fact]
@@ -1007,6 +1058,8 @@ public sealed class InMemoryEventRepository : IEventRepository
 
     public Task<IReadOnlyList<FileEventItem>> ListFileEventsAsync(
         string? cameraName,
+        DateTimeOffset? fromUtc,
+        DateTimeOffset? toUtc,
         int offset,
         int limit,
         CancellationToken cancellationToken)
@@ -1028,6 +1081,8 @@ public sealed class InMemoryEventRepository : IEventRepository
                     item.EndedUtc,
                     item.Status))
             .Where(entry => cameraName is null || entry.CameraName == cameraName)
+            .Where(entry => fromUtc is null || entry.StartedUtc >= fromUtc)
+            .Where(entry => toUtc is null || entry.StartedUtc <= toUtc)
             .OrderByDescending(entry => entry.StartedUtc)
             .ThenBy(entry => entry.PartIndex)
             .Skip(offset)

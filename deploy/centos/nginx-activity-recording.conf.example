@@ -64,8 +64,10 @@ http {
             proxy_pass_header Accept-Ranges;
             proxy_pass_header Content-Range;
             proxy_connect_timeout 5s;
-            proxy_read_timeout 60s;
-            proxy_send_timeout 60s;
+            # 录像 MP4 单个可达上百 MB，外网慢链路整体传输耗时远超默认值；
+            # read/send 超时按"相邻两次传输间隔"计时，放大到 5 分钟避免慢客户端被中断。
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
             proxy_buffering off;
             proxy_max_temp_file_size 0;
             proxy_cache off;
